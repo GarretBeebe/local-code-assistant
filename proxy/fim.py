@@ -10,6 +10,7 @@ def to_ollama_generate(req: CompletionRequest) -> dict:
         "model": req.model,
         "prompt": req.prompt,
         "stream": req.stream,
+        "raw": True,  # skip Ollama's chat template so FIM tokens reach the model literally
         "options": {
             "num_ctx": settings.FIM_NUM_CTX,
             "num_predict": req.max_tokens if req.max_tokens is not None else settings.FIM_MAX_TOKENS,
