@@ -66,12 +66,42 @@ def _stream_chat(payload: dict, model: str) -> Iterator[str]:
 
 
 def _stream_completion(payload: dict, model: str) -> Iterator[str]:
+    """Stream FIM completion, stopping at double-newline.
+
+    qwen2.5-coder Q4 doesn't reliably emit <|endoftext|> to self-terminate
+    FIM completions. Without intervention the model runs into prose.
+    Stopping at the first \\n\\n after real content captures the intended
+    completion without the runon.
+    """
     completion_id = f"cmpl-{uuid.uuid4().hex}"
+    has_content = False
+    tail = ""  # rolling 2-char window to detect \\n\\n split across chunks
     with ollama_client.post_stream("/api/generate", payload) as lines:
         for line in lines:
             if not line:
                 continue
-            chunk = fim.format_completion_chunk(json.loads(line), model, completion_id)
+            data = json.loads(line)
+            if data.get("done"):
+                break
+            text = data.get("response", "")
+            if not text:
+                continue
+            if text.strip():
+                has_content = True
+            if has_content:
+                combined = tail + text
+                stop = combined.find("\n\n")
+                if stop != -1:
+                    before = combined[len(tail):stop]
+                    if before:
+                        chunk = fim.format_completion_chunk(
+                            {"response": before}, model, completion_id
+                        )
+                        if chunk:
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                    break
+                tail = combined[-2:]
+            chunk = fim.format_completion_chunk(data, model, completion_id)
             if chunk:
                 yield f"data: {json.dumps(chunk)}\n\n"
     yield "data: [DONE]\n\n"

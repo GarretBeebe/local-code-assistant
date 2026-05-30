@@ -22,3 +22,5 @@ class CompletionRequest(BaseModel):
     stream: bool = False
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
+    stop: Optional[list[str]] = None
+    suffix: Optional[str] = None
