@@ -28,12 +28,29 @@ Continue.dev (VS Code / JetBrains)
 
 ## Build Milestones
 
-| Milestone | Description | Status |
-|---|---|---|
-| v1 | Transparent proxy — forward Continue.dev → Ollama, prove the pipeline | ✅ |
-| v2 | Context injection — tree-sitter symbol extraction, watchdog file watcher, SQLite store | 🔲 |
-| v3 | Dual-model routing — FIM → 7b, chat → 14b with tuned generation options | 🔲 |
-| v4 | RAG bridge — optional Qdrant integration for document chunk retrieval | 🔲 |
+**v1 — Transparent proxy ✅ complete**
+- FastAPI proxy forwards Continue.dev → Ollama unchanged
+- `/v1/chat/completions` (streaming + non-streaming)
+- `/v1/completions` (FIM passthrough with qwen2.5-coder token formatting)
+- `/v1/models` passthrough
+- Continue.dev connected, autocomplete + chat working end-to-end
+
+**v2 — Context injection 🔲**
+- `tree-sitter-languages` parses Python, TypeScript, JavaScript
+- watchdog watcher populates SQLite symbol store
+- Context manager injects top-N relevant signatures into system prompt
+- Success metric: fewer "undefined symbol" mistakes in chat completions
+
+**v3 — Dual-model routing 🔲**
+- `/v1/completions` (FIM) explicitly routed to `qwen2.5-coder:7b`
+- `/v1/chat/completions` explicitly routed to `qwen2.5-coder:14b`
+- FIM-specific generation options: `temperature=0.1`, `num_predict=128`, `num_ctx=4096`
+- Success metric: autocomplete p50 latency < 1.5s
+
+**v4 — RAG bridge 🔲**
+- For chat requests, query Qdrant (`localhost:6333`) for relevant document chunks
+- Append top-2 chunks to system prompt alongside symbol context
+- Designed for co-location with [`rag-system`](https://github.com/GarretBeebe/rag-system)
 
 ## Quickstart (Docker)
 
