@@ -30,16 +30,38 @@ Continue.dev (VS Code / JetBrains)
 
 | Milestone | Description | Status |
 |---|---|---|
-| v1 | Transparent proxy — forward Continue.dev → Ollama, prove the pipeline | 🔲 |
+| v1 | Transparent proxy — forward Continue.dev → Ollama, prove the pipeline | ✅ |
 | v2 | Context injection — tree-sitter symbol extraction, watchdog file watcher, SQLite store | 🔲 |
 | v3 | Dual-model routing — FIM → 7b, chat → 14b with tuned generation options | 🔲 |
 | v4 | RAG bridge — optional Qdrant integration for document chunk retrieval | 🔲 |
 
+## Quickstart (Docker)
+
+```bash
+cp .env.example .env        # edit if you want to override model names or context sizes
+docker compose up --build
+curl localhost:8080/healthz  # {"status":"ok"}
+```
+
+Ollama stays on the host. The compose file reaches it via `host.docker.internal:11434` —
+this works on Windows and macOS natively, and on Linux via the `extra_hosts: host-gateway` entry.
+
+Pull the models if you haven't already:
+
+```bash
+ollama pull qwen2.5-coder:14b   # chat / edit
+ollama pull qwen2.5-coder:7b    # FIM autocomplete
+```
+
 ## Deployment
 
-**Linux (systemd):** Run uvicorn directly on the host. Ollama at `localhost:11434` — zero hops.
+**Docker (Windows / cross-platform):** Single-service compose stack. Ollama stays on the host; reached via `host.docker.internal:11434`.
 
-**Windows / cross-platform (Docker):** Single-service compose stack. Ollama stays on the host; reached via `host.docker.internal:11434`.
+**Linux (systemd):** Run uvicorn directly on the host for zero-hop Ollama access:
+```bash
+pip install -e .
+uvicorn proxy.server:app --port 8080
+```
 
 See [`context/local-code-assistant.md`](context/local-code-assistant.md) for full architecture notes and [`context/v1-transparent-proxy.md`](context/v1-transparent-proxy.md) for the v1 implementation spec.
 
