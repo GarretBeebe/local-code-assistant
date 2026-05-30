@@ -70,6 +70,16 @@ ollama pull qwen2.5-coder:14b   # chat / edit
 ollama pull qwen2.5-coder:7b    # FIM autocomplete
 ```
 
+## Testing
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+Tests run without Ollama — all external calls are mocked.
+
 ## Deployment
 
 **Docker (Windows / cross-platform):** Single-service compose stack. Ollama stays on the host; reached via `host.docker.internal:11434`.
