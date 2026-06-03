@@ -55,7 +55,7 @@ Continue.dev (VS Code / JetBrains)
 ## Quickstart (Docker)
 
 ```bash
-cp .env.example .env        # edit if you want to override context sizes, token limits, or port
+cp .env.example .env        # see .env.example — set PROXY_AUTH_TOKEN if exposing outside localhost
 docker compose up --build
 curl localhost:8080/healthz  # {"status":"ok"}
 ```
@@ -94,6 +94,8 @@ See [`context/local-code-assistant.md`](context/local-code-assistant.md) for ful
 
 ## Continue.dev Config
 
+Set `apiKey` to your `PROXY_AUTH_TOKEN` value (or any string if auth is disabled).
+
 ```json
 {
   "models": [
@@ -102,7 +104,7 @@ See [`context/local-code-assistant.md`](context/local-code-assistant.md) for ful
       "provider": "openai",
       "model": "qwen2.5-coder:14b",
       "apiBase": "http://localhost:8080/v1",
-      "apiKey": "local"
+      "apiKey": "<PROXY_AUTH_TOKEN>"
     }
   ],
   "tabAutocompleteModel": {
@@ -110,7 +112,7 @@ See [`context/local-code-assistant.md`](context/local-code-assistant.md) for ful
     "provider": "openai",
     "model": "qwen2.5-coder:7b",
     "apiBase": "http://localhost:8080/v1",
-    "apiKey": "local"
+    "apiKey": "<PROXY_AUTH_TOKEN>"
   }
 }
 ```
