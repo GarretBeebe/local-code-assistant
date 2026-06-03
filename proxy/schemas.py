@@ -21,4 +21,4 @@ class ChatRequest(_BaseRequest):
 
 class CompletionRequest(_BaseRequest):
     prompt: str = Field(min_length=1, max_length=32_768)
-    stop: list[str] | None = Field(None, max_length=4)
+    stop: list[str] | None = Field(None, max_length=20)

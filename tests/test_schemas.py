@@ -70,6 +70,11 @@ def test_empty_messages_list_rejected():
         ChatRequest(model="m", messages=[])
 
 
+def test_stop_twelve_accepted():
+    req = CompletionRequest(model="m", prompt="p", stop=[str(i) for i in range(12)])
+    assert len(req.stop) == 12
+
+
 def test_stop_too_many_rejected():
     with pytest.raises(ValidationError):
-        CompletionRequest(model="m", prompt="p", stop=["a", "b", "c", "d", "e"])
+        CompletionRequest(model="m", prompt="p", stop=[str(i) for i in range(21)])
