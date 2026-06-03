@@ -55,7 +55,7 @@ Continue.dev (VS Code / JetBrains)
 ## Quickstart (Docker)
 
 ```bash
-cp .env.example .env        # edit if you want to override model names or context sizes
+cp .env.example .env        # edit if you want to override context sizes, token limits, or port
 docker compose up --build
 curl localhost:8080/healthz  # {"status":"ok"}
 ```

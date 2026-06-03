@@ -12,6 +12,8 @@ from proxy.schemas import ChatRequest, CompletionRequest
 
 app = FastAPI()
 
+_SSE_OLLAMA_ERROR = 'data: {"error": {"message": "malformed response from Ollama", "type": "server_error"}}\n\n'
+
 
 @app.get("/healthz")
 def healthz():
@@ -37,6 +39,8 @@ def _to_ollama_chat(req: ChatRequest) -> dict:
     }
     if req.temperature is not None:
         payload["options"]["temperature"] = req.temperature
+    if req.max_tokens is not None:
+        payload["options"]["num_predict"] = req.max_tokens
     return payload
 
 
@@ -53,13 +57,40 @@ def _format_chat_chunk(line: dict, model: str, chat_id: str) -> dict | None:
     }
 
 
+def _format_completion_chunk(line: dict, model: str, completion_id: str) -> dict | None:
+    if line.get("done"):
+        return None
+    return {
+        "id": completion_id,
+        "object": "text_completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"text": line.get("response", ""), "index": 0, "finish_reason": None}],
+    }
+
+
+def _format_completion_response(data: dict, model: str) -> dict:
+    return {
+        "id": f"cmpl-{uuid.uuid4().hex}",
+        "object": "text_completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"text": data.get("response", ""), "index": 0, "finish_reason": "stop"}],
+    }
+
+
 def _stream_chat(payload: dict, model: str) -> Iterator[str]:
     chat_id = f"chatcmpl-{uuid.uuid4().hex}"
     with ollama_client.post_stream("/api/chat", payload) as lines:
         for line in lines:
             if not line:
                 continue
-            chunk = _format_chat_chunk(json.loads(line), model, chat_id)
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                yield _SSE_OLLAMA_ERROR
+                return
+            chunk = _format_chat_chunk(data, model, chat_id)
             if chunk:
                 yield f"data: {json.dumps(chunk)}\n\n"
     yield "data: [DONE]\n\n"
@@ -80,7 +111,11 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
         for line in lines:
             if not line:
                 continue
-            data = json.loads(line)
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                yield _SSE_OLLAMA_ERROR
+                return
             if data.get("done"):
                 break
             text = data.get("response", "")
@@ -94,14 +129,15 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
                 if stop != -1:
                     before = combined[len(tail):stop]
                     if before:
-                        chunk = fim.format_completion_chunk(
+                        chunk = _format_completion_chunk(
                             {"response": before}, model, completion_id
                         )
                         if chunk:
                             yield f"data: {json.dumps(chunk)}\n\n"
                     break
                 tail = combined[-2:]
-            chunk = fim.format_completion_chunk(data, model, completion_id)
+            # reaches here for pre-content chunks and in-progress content without a stop marker
+            chunk = _format_completion_chunk(data, model, completion_id)
             if chunk:
                 yield f"data: {json.dumps(chunk)}\n\n"
     yield "data: [DONE]\n\n"
@@ -130,4 +166,4 @@ def completions(req: CompletionRequest):
             _stream_completion(payload, req.model), media_type="text/event-stream"
         )
     data = ollama_client.post_json("/api/generate", payload)
-    return fim.format_completion_response(data, req.model)
+    return _format_completion_response(data, req.model)

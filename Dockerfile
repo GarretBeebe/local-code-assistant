@@ -5,4 +5,4 @@ COPY pyproject.toml .
 # The COPY below overwrites with the real package.
 RUN mkdir -p proxy && touch proxy/__init__.py && pip install --no-cache-dir -e .
 COPY . .
-CMD ["uvicorn", "proxy.server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD exec uvicorn proxy.server:app --host 0.0.0.0 --port ${PROXY_PORT:-8080}

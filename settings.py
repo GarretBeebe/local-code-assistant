@@ -1,10 +1,26 @@
 import os
 
-OLLAMA_BASE_URL        = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-CHAT_MODEL             = os.environ.get("CHAT_MODEL", "qwen2.5-coder:14b")
-FIM_MODEL              = os.environ.get("FIM_MODEL", "qwen2.5-coder:7b")
-CHAT_NUM_CTX           = int(os.environ.get("CHAT_NUM_CTX", "8192"))
-FIM_NUM_CTX            = int(os.environ.get("FIM_NUM_CTX", "4096"))
-FIM_MAX_TOKENS         = int(os.environ.get("FIM_MAX_TOKENS", "128"))
-PROXY_PORT             = int(os.environ.get("PROXY_PORT", "8080"))
-OLLAMA_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "120.0"))
+
+def _int(key: str, default: str) -> int:
+    val = os.environ.get(key, default)
+    try:
+        return int(val)
+    except ValueError:
+        raise ValueError(f"Invalid value for {key}: {val!r} (expected integer)")
+
+
+def _float(key: str, default: str) -> float:
+    val = os.environ.get(key, default)
+    try:
+        return float(val)
+    except ValueError:
+        raise ValueError(f"Invalid value for {key}: {val!r} (expected float)")
+
+
+OLLAMA_BASE_URL         = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+CHAT_NUM_CTX            = _int("CHAT_NUM_CTX", "8192")
+FIM_NUM_CTX             = _int("FIM_NUM_CTX", "4096")
+FIM_MAX_TOKENS          = _int("FIM_MAX_TOKENS", "128")
+FIM_DEFAULT_TEMPERATURE = _float("FIM_DEFAULT_TEMPERATURE", "0.1")
+PROXY_PORT              = _int("PROXY_PORT", "8080")
+OLLAMA_TIMEOUT_SECONDS  = _float("OLLAMA_TIMEOUT_SECONDS", "120.0")

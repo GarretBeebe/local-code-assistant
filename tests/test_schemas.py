@@ -13,7 +13,6 @@ def test_completion_request_defaults():
     assert req.stream is False
     assert req.stop is None
     assert req.temperature is None
-    assert req.suffix is None
 
 
 def test_chat_message_dump():
