@@ -54,6 +54,11 @@ def retrieve(req: RetrieveRequest) -> dict:
 Uses a new setting `RAG_INTERNAL_TOKEN`. If unset, the endpoint is disabled (returns 503).
 This is a machine-to-machine credential, not user auth — no session, no cookie.
 
+**Semaphore:** This handler does NOT acquire `_RAG_CONCURRENCY`. Retrieval without generation
+is ~30-40% of the cost of a full RAG request (no Ollama generation step). Sharing the semaphore
+would cause context injection to silently time out during normal rag-system use, since 4 slots
+are quickly occupied by full requests. The handler calls `retrieve_best()` directly.
+
 **Middleware bypass:** Add `/v1/retrieve` to the security_middleware bypass list (same pattern
 as `/auth/login`) so the global auth check doesn't 401 the request before the handler runs.
 The handler performs its own auth check immediately.
@@ -132,12 +137,28 @@ degrades silently to v1 behavior (no context), which is always correct.
 
 ### New file: `context/manager.py`
 
-Assembles the system prompt prefix from retrieved chunks:
+Assembles the system prompt prefix from retrieved chunks. Builds the retrieval query from
+the last user message plus the last assistant message (truncated), so follow-up questions
+("make it more efficient") carry the context of what was just discussed.
 
 ```python
 from context import rag_client
+from proxy.schemas import Message
 
-def build_context_prefix(query: str) -> str:
+_QUERY_TRUNCATE = 300
+
+def _build_query(messages: list[Message]) -> str:
+    last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+    last_assistant = next((m.content for m in reversed(messages) if m.role == "assistant"), "")
+    query = last_user[:_QUERY_TRUNCATE]
+    if last_assistant:
+        query += " " + last_assistant[:_QUERY_TRUNCATE]
+    return query.strip()
+
+def build_context_prefix(messages: list[Message]) -> str:
+    query = _build_query(messages)
+    if not query:
+        return ""
     chunks = rag_client.retrieve_chunks(query)
     if not chunks:
         return ""
@@ -150,20 +171,21 @@ def build_context_prefix(query: str) -> str:
     return "\n".join(lines)
 ```
 
+The assistant's last reply is the cheapest possible conversation summary — it already exists,
+costs nothing to produce, and tends to name the specific symbols under discussion. On the first
+turn (no assistant message yet) only the user message is used.
+
 ### Modified: `proxy/server.py`
 
 Two changes:
 
-1. Extract the user's query from the messages for the retrieval call:
+1. Pass the full messages list to the context manager, which handles query construction:
 ```python
 from context import manager as ctx_manager
 
 def _to_ollama_chat(req: ChatRequest) -> dict:
     messages = [m.model_dump() for m in req.messages]
-    user_text = next(
-        (m.content for m in reversed(req.messages) if m.role == "user"), ""
-    )
-    prefix = ctx_manager.build_context_prefix(user_text)
+    prefix = ctx_manager.build_context_prefix(req.messages)
     if prefix:
         messages = [{"role": "system", "content": prefix}] + messages
     payload: dict = {
@@ -173,9 +195,9 @@ def _to_ollama_chat(req: ChatRequest) -> dict:
     }
 ```
 
-Note: `user_text` is passed to `retrieve_chunks` as the semantic query. This is more
-meaningful than passing the full messages array — the retrieval model needs a short, dense
-query, not a conversation thread.
+`build_context_prefix` extracts the last user message and last assistant message internally
+(see `context/manager.py`). `proxy/server.py` does not need to know the query construction
+strategy.
 
 2. No lifespan changes needed — there's no background thread to start.
 
@@ -256,25 +278,5 @@ The retrieval call adds ~200-500ms to each chat completion (embed + Qdrant + rer
 Chat completions are not latency-sensitive at the same level as FIM — a 500ms overhead on a
 request that then waits 2-5s for generation is acceptable.
 
-If rag-system is under load and hits its concurrency limit, `/v1/retrieve` will queue behind
-other requests. Consider whether the internal token endpoint should bypass the semaphore in
-rag-system — it probably should, since it's a lightweight retrieval-only call with no
-generation step.
-
----
-
-## Open questions
-
-1. **Should `/v1/retrieve` bypass rag-system's `RAG_CONCURRENCY_LIMIT` semaphore?**
-   Retrieval without generation is much cheaper than a full RAG request. Sharing the
-   semaphore could cause context injection to time out during heavy rag-system load. Bypassing
-   it (or having a separate limit) is probably correct.
-
-2. **How much context is useful?** `RAG_CONTEXT_CHUNKS=3` is a guess. Each chunk is up to
-   `MAX_CHUNK_CHARS=2000` characters. 3 chunks = up to 6000 characters of injected context.
-   That's substantial — may need to tune down if it crowds out the user's actual message in
-   the context window.
-
-3. **Should the query include conversation history?** Using only the last user message is
-   simple. Using the last N messages (concatenated) would give better retrieval for follow-up
-   questions but increases query length and noise. Start with last message only.
+`/v1/retrieve` bypasses the `_RAG_CONCURRENCY` semaphore (see handler notes above), so it
+never queues behind full RAG requests regardless of rag-system load.
