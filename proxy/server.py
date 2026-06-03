@@ -29,13 +29,6 @@ def _verify_token(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-def _check_model(model: str) -> None:
-    """Must be called explicitly in each handler — model lives in the request body,
-    so FastAPI cannot inject this as a path/query dependency automatically."""
-    if settings.ALLOWED_MODELS is not None and model not in settings.ALLOWED_MODELS:
-        raise HTTPException(status_code=403, detail=f"Model not allowed: {model}")
-
-
 def _sse_error(message: str) -> str:
     return f'data: {json.dumps({"error": {"message": message, "type": "server_error"}})}\n\n'
 
@@ -66,7 +59,7 @@ def list_models() -> dict:
 
 def _to_ollama_chat(req: ChatRequest) -> dict:
     payload: dict = {
-        "model": req.model,
+        "model": settings.CHAT_MODEL,
         "messages": [m.model_dump() for m in req.messages],
         "stream": req.stream,
         "options": {"num_ctx": settings.CHAT_NUM_CTX},
@@ -170,29 +163,27 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
 
 @app.post("/v1/chat/completions", dependencies=[Depends(_verify_token)])
 def chat_completions(req: ChatRequest):
-    _check_model(req.model)
     payload = _to_ollama_chat(req)
     if req.stream:
-        return StreamingResponse(_stream_chat(payload, req.model), media_type="text/event-stream")
+        return StreamingResponse(_stream_chat(payload, settings.CHAT_MODEL), media_type="text/event-stream")
     data = ollama_client.post_json("/api/chat", payload)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": req.model,
+        "model": settings.CHAT_MODEL,
         "choices": [{"index": 0, "message": data.get("message", {}), "finish_reason": "stop"}],
     }
 
 
 @app.post("/v1/completions", dependencies=[Depends(_verify_token)])
 def completions(req: CompletionRequest):
-    _check_model(req.model)
     payload = fim.to_ollama_generate(req)
     if req.stream:
         return StreamingResponse(
-            _stream_completion(payload, req.model), media_type="text/event-stream"
+            _stream_completion(payload, settings.FIM_MODEL), media_type="text/event-stream"
         )
     data = ollama_client.post_json("/api/generate", payload)
     return formatting.format_completion_response(
-        _truncate_fim_text(data.get("response", "")), req.model
+        _truncate_fim_text(data.get("response", "")), settings.FIM_MODEL
     )

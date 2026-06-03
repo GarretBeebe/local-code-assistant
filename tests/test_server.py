@@ -222,14 +222,14 @@ def test_auth_invalid_token(monkeypatch):
 
 # --- model allowlist ---
 
-def test_model_blocked(monkeypatch):
-    monkeypatch.setattr(settings, "ALLOWED_MODELS", frozenset({"allowed-model"}))
-    resp = client.post("/v1/completions", json={"model": "blocked-model", "prompt": "p"})
-    assert resp.status_code == 403
+def test_configured_model_not_in_allowlist_raises():
+    from settings import _check_configured_models
+    import pytest
+    with pytest.raises(ValueError, match="not in ALLOWED_MODELS"):
+        _check_configured_models(frozenset({"other-model"}), "qwen2.5-coder:7b")
 
 
-def test_model_allowed(monkeypatch):
-    monkeypatch.setattr(settings, "ALLOWED_MODELS", frozenset({"qwen2.5-coder:7b"}))
+def test_fim_request_succeeds():
     with patch.object(ollama_client, "post_json", return_value={"response": "ok"}):
         resp = client.post("/v1/completions", json={"model": "qwen2.5-coder:7b", "prompt": "p"})
     assert resp.status_code == 200

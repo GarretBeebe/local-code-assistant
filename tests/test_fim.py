@@ -6,7 +6,7 @@ from proxy.schemas import CompletionRequest
 def test_to_ollama_generate_defaults():
     req = CompletionRequest(model="m", prompt="p")
     payload = to_ollama_generate(req)
-    assert payload["model"] == "m"
+    assert payload["model"] == settings.FIM_MODEL
     assert payload["prompt"] == "p"
     assert payload["raw"] is True
     assert payload["options"]["temperature"] == settings.FIM_DEFAULT_TEMPERATURE

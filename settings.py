@@ -18,6 +18,8 @@ def _float(key: str, default: str) -> float:
 
 
 OLLAMA_BASE_URL         = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+CHAT_MODEL              = os.environ.get("CHAT_MODEL", "qwen2.5-coder:14b")
+FIM_MODEL               = os.environ.get("FIM_MODEL",  "qwen2.5-coder:7b")
 CHAT_NUM_CTX            = _int("CHAT_NUM_CTX", "8192")
 FIM_NUM_CTX             = _int("FIM_NUM_CTX", "4096")
 FIM_MAX_TOKENS          = _int("FIM_MAX_TOKENS", "128")
@@ -31,3 +33,12 @@ _parsed_models = frozenset(m.strip() for m in _raw_models.split(",") if m.strip(
 if _parsed_models is not None and not _parsed_models:
     raise ValueError("ALLOWED_MODELS is set but contains no valid model names")
 ALLOWED_MODELS: frozenset[str] | None = _parsed_models
+
+def _check_configured_models(allowed: frozenset[str] | None, *models: str) -> None:
+    if allowed is None:
+        return
+    for m in models:
+        if m not in allowed:
+            raise ValueError(f"Configured model {m!r} is not in ALLOWED_MODELS")
+
+_check_configured_models(ALLOWED_MODELS, CHAT_MODEL, FIM_MODEL)

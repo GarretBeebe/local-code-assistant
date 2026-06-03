@@ -11,7 +11,7 @@ def to_ollama_generate(req: CompletionRequest) -> dict:
     if req.stop:
         options["stop"] = req.stop
     return {
-        "model": req.model,
+        "model": settings.FIM_MODEL,
         "prompt": req.prompt,
         "stream": req.stream,
         "raw": True,  # skip Ollama's chat template so FIM tokens reach the model literally
