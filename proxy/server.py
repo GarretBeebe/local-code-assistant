@@ -62,26 +62,25 @@ def _parse_stream_line(line: str) -> dict:
 
 
 def _find_fim_truncation(tail: str, text: str) -> tuple[str | None, str]:
-    """Detect \\n\\n across chunk boundaries. Returns (text_before_stop, new_tail).
+    """Detect \\n\\n after real content, across chunk boundaries. Returns (text_before_stop, new_tail).
     text_before_stop is None when no stop marker is found."""
     combined = tail + text
-    stop = combined.find("\n\n")
+    content_start = next((i for i, c in enumerate(combined) if c.strip()), None)
+    if content_start is None:
+        return None, combined[-2:]
+    stop = combined.find("\n\n", content_start)
     if stop != -1:
         return combined[len(tail):stop], ""
     return None, combined[-2:]
 
 
 def _truncate_fim_text(text: str) -> str:
-    content_start = next((i for i, c in enumerate(text) if c.strip()), None)
-    if content_start is None:
-        return text
-    stop = text.find("\n\n", content_start)
-    return text[:stop] if stop != -1 else text
+    before_stop, _ = _find_fim_truncation("", text)
+    return before_stop if before_stop is not None else text
 
 
 def _iter_completion_text(payload: dict) -> Iterator[str]:
     """Yield raw FIM text chunks from Ollama, stopping at \\n\\n after real content."""
-    has_content = False
     tail = ""
     with ollama_client.post_stream("/api/generate", payload) as lines:
         for line in lines:
@@ -93,14 +92,11 @@ def _iter_completion_text(payload: dict) -> Iterator[str]:
             text = data.get("response", "")
             if not text:
                 continue
-            if text.strip():
-                has_content = True
-            if has_content:
-                before_stop, tail = _find_fim_truncation(tail, text)
-                if before_stop is not None:
-                    if before_stop:
-                        yield before_stop
-                    return
+            before_stop, tail = _find_fim_truncation(tail, text)
+            if before_stop is not None:
+                if before_stop:
+                    yield before_stop
+                return
             yield text
 
 

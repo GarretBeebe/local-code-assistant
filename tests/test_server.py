@@ -149,3 +149,42 @@ def test_completions_stream_double_newline_within_single_chunk():
     assert resp.status_code == 200
     assert "kept" in resp.text
     assert "dropped" not in resp.text
+
+
+def test_completions_stream_leading_blank_lines_not_truncated():
+    """\\n\\n before real content in a single chunk must not truncate the output."""
+    lines = [
+        json.dumps({"response": "\n\ncode", "done": False}),
+        json.dumps({"done": True}),
+    ]
+    with patch.object(ollama_client, "post_stream", _stream(*lines)):
+        resp = client.post("/v1/completions", json={
+            "model": "qwen2.5-coder:7b", "prompt": "p", "stream": True,
+        })
+    assert resp.status_code == 200
+    assert "code" in resp.text
+    assert "[DONE]" in resp.text
+
+
+def test_completions_stream_blank_only_chunk_before_content():
+    """A blank-only chunk followed by content must not trigger truncation."""
+    lines = [
+        json.dumps({"response": "\n\n", "done": False}),
+        json.dumps({"response": "code", "done": False}),
+        json.dumps({"done": True}),
+    ]
+    with patch.object(ollama_client, "post_stream", _stream(*lines)):
+        resp = client.post("/v1/completions", json={
+            "model": "qwen2.5-coder:7b", "prompt": "p", "stream": True,
+        })
+    assert resp.status_code == 200
+    assert "code" in resp.text
+    assert "[DONE]" in resp.text
+
+
+def test_completions_non_streaming_leading_blank_lines_not_truncated():
+    """Non-streaming: \\n\\n before real content must not truncate the response."""
+    with patch.object(ollama_client, "post_json", return_value={"response": "\n\ncode"}):
+        resp = client.post("/v1/completions", json={"model": "qwen2.5-coder:7b", "prompt": "p"})
+    assert resp.status_code == 200
+    assert "code" in resp.json()["choices"][0]["text"]
