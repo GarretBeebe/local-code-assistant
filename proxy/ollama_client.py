@@ -1,4 +1,5 @@
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 
 import requests
@@ -31,7 +32,7 @@ def post_json(path: str, payload: dict, timeout: float = settings.OLLAMA_TIMEOUT
 
 
 @contextmanager
-def post_stream(path: str, payload: dict, timeout: float = settings.OLLAMA_TIMEOUT_SECONDS):
+def post_stream(path: str, payload: dict, timeout: float = settings.OLLAMA_TIMEOUT_SECONDS) -> Iterator[str]:
     with _session().post(_url(path), json=payload, stream=True, timeout=timeout) as resp:
         resp.raise_for_status()
         yield resp.iter_lines(decode_unicode=True)

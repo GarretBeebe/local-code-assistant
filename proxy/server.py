@@ -79,15 +79,31 @@ def _format_completion_response(data: dict, model: str) -> dict:
     }
 
 
+def _parse_stream_line(line: str) -> dict | None:
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+def _find_fim_truncation(tail: str, text: str) -> tuple[str | None, str]:
+    """Detect \\n\\n across chunk boundaries. Returns (text_before_stop, new_tail).
+    text_before_stop is None when no stop marker is found."""
+    combined = tail + text
+    stop = combined.find("\n\n")
+    if stop != -1:
+        return combined[len(tail):stop], ""
+    return None, combined[-2:]
+
+
 def _stream_chat(payload: dict, model: str) -> Iterator[str]:
     chat_id = f"chatcmpl-{uuid.uuid4().hex}"
     with ollama_client.post_stream("/api/chat", payload) as lines:
         for line in lines:
             if not line:
                 continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
+            data = _parse_stream_line(line)
+            if data is None:
                 yield _SSE_OLLAMA_ERROR
                 return
             chunk = _format_chat_chunk(data, model, chat_id)
@@ -106,14 +122,13 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
     """
     completion_id = f"cmpl-{uuid.uuid4().hex}"
     has_content = False
-    tail = ""  # rolling 2-char window to detect \\n\\n split across chunks
+    tail = ""
     with ollama_client.post_stream("/api/generate", payload) as lines:
         for line in lines:
             if not line:
                 continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
+            data = _parse_stream_line(line)
+            if data is None:
                 yield _SSE_OLLAMA_ERROR
                 return
             if data.get("done"):
@@ -124,19 +139,13 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
             if text.strip():
                 has_content = True
             if has_content:
-                combined = tail + text
-                stop = combined.find("\n\n")
-                if stop != -1:
-                    before = combined[len(tail):stop]
-                    if before:
-                        chunk = _format_completion_chunk(
-                            {"response": before}, model, completion_id
-                        )
-                        if chunk:
-                            yield f"data: {json.dumps(chunk)}\n\n"
+                before_stop, tail = _find_fim_truncation(tail, text)
+                if before_stop is not None:
+                    chunk = _format_completion_chunk({"response": before_stop}, model, completion_id)
+                    if chunk:
+                        yield f"data: {json.dumps(chunk)}\n\n"
                     break
-                tail = combined[-2:]
-            # reaches here for pre-content chunks and in-progress content without a stop marker
+            # pre-content phase or in-progress without stop marker — yield the full chunk
             chunk = _format_completion_chunk(data, model, completion_id)
             if chunk:
                 yield f"data: {json.dumps(chunk)}\n\n"
