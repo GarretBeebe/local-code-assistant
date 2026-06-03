@@ -1,20 +1,20 @@
 import os
 
 
-def _int(key: str, default: str) -> int:
+def _env_typed(key: str, default: str, cast: type, label: str):
     val = os.environ.get(key, default)
     try:
-        return int(val)
+        return cast(val)
     except ValueError:
-        raise ValueError(f"Invalid value for {key}: {val!r} (expected integer)")
+        raise ValueError(f"Invalid value for {key}: {val!r} (expected {label})")
+
+
+def _int(key: str, default: str) -> int:
+    return _env_typed(key, default, int, "integer")
 
 
 def _float(key: str, default: str) -> float:
-    val = os.environ.get(key, default)
-    try:
-        return float(val)
-    except ValueError:
-        raise ValueError(f"Invalid value for {key}: {val!r} (expected float)")
+    return _env_typed(key, default, float, "float")
 
 
 OLLAMA_BASE_URL         = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")

@@ -15,21 +15,19 @@ def format_chat_chunk(line: dict, model: str, chat_id: str) -> dict | None:
     }
 
 
-def format_completion_chunk(text: str, model: str, completion_id: str) -> dict:
+def _completion_dict(text: str, model: str, completion_id: str, finish_reason: str | None) -> dict:
     return {
         "id": completion_id,
         "object": "text_completion",
         "created": int(time.time()),
         "model": model,
-        "choices": [{"text": text, "index": 0, "finish_reason": None}],
+        "choices": [{"text": text, "index": 0, "finish_reason": finish_reason}],
     }
+
+
+def format_completion_chunk(text: str, model: str, completion_id: str) -> dict:
+    return _completion_dict(text, model, completion_id, None)
 
 
 def format_completion_response(text: str, model: str) -> dict:
-    return {
-        "id": f"cmpl-{uuid.uuid4().hex}",
-        "object": "text_completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"text": text, "index": 0, "finish_reason": "stop"}],
-    }
+    return _completion_dict(text, model, f"cmpl-{uuid.uuid4().hex}", "stop")

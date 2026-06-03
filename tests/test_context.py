@@ -9,6 +9,13 @@ from proxy.schemas import ChatMessage, ChatRequest
 from proxy.server import _to_ollama_chat
 
 
+def _fake_resp(chunks) -> object:
+    class _Resp:
+        def raise_for_status(self) -> None: pass
+        def json(self) -> dict: return {"chunks": chunks}
+    return _Resp()
+
+
 # --- rag_client ---
 
 def test_retrieve_chunks_disabled_when_no_base_url(monkeypatch):
@@ -36,22 +43,14 @@ def test_retrieve_chunks_returns_empty_on_exception(rag_configured):
 
 
 def test_retrieve_chunks_returns_empty_when_chunks_not_a_list(rag_configured):
-    class FakeResp:
-        def raise_for_status(self): pass
-        def json(self): return {"chunks": "bad response"}
-
-    with patch.object(rag_client._session, "post", return_value=FakeResp()):
+    with patch.object(rag_client._session, "post", return_value=_fake_resp("bad response")):
         assert rag_client.retrieve_chunks("foo") == []
 
 
 def test_retrieve_chunks_returns_data_on_success(rag_configured):
     fake_chunks = [{"text": "def foo(): pass", "filepath": "/f.py", "score": 0.9}]
 
-    class FakeResp:
-        def raise_for_status(self): pass
-        def json(self): return {"chunks": fake_chunks}
-
-    with patch.object(rag_client._session, "post", return_value=FakeResp()):
+    with patch.object(rag_client._session, "post", return_value=_fake_resp(fake_chunks)):
         result = rag_client.retrieve_chunks("foo function")
 
     assert result == fake_chunks
