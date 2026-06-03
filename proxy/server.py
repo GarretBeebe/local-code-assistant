@@ -3,11 +3,12 @@ import time
 import uuid
 from typing import Iterator
 
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 import settings
-from proxy import fim, ollama_client
+from proxy import fim, formatting, ollama_client
+from proxy.ollama_client import OllamaError
 from proxy.schemas import ChatRequest, CompletionRequest
 
 app = FastAPI()
@@ -15,13 +16,21 @@ app = FastAPI()
 _SSE_OLLAMA_ERROR = 'data: {"error": {"message": "malformed response from Ollama", "type": "server_error"}}\n\n'
 
 
+@app.exception_handler(OllamaError)
+def ollama_error_handler(request: Request, exc: OllamaError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"message": exc.message, "type": "upstream_error"}},
+    )
+
+
 @app.get("/healthz")
-def healthz():
+def healthz() -> dict:
     return {"status": "ok"}
 
 
 @app.get("/v1/models")
-def list_models():
+def list_models() -> dict:
     data = ollama_client.get_json("/api/tags")
     models = [
         {"id": m["name"], "object": "model", "created": 0, "owned_by": "local"}
@@ -44,46 +53,11 @@ def _to_ollama_chat(req: ChatRequest) -> dict:
     return payload
 
 
-def _format_chat_chunk(line: dict, model: str, chat_id: str) -> dict | None:
-    if line.get("done"):
-        return None
-    content = line.get("message", {}).get("content", "")
-    return {
-        "id": chat_id,
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
-    }
-
-
-def _format_completion_chunk(line: dict, model: str, completion_id: str) -> dict | None:
-    if line.get("done"):
-        return None
-    return {
-        "id": completion_id,
-        "object": "text_completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"text": line.get("response", ""), "index": 0, "finish_reason": None}],
-    }
-
-
-def _format_completion_response(data: dict, model: str) -> dict:
-    return {
-        "id": f"cmpl-{uuid.uuid4().hex}",
-        "object": "text_completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"text": data.get("response", ""), "index": 0, "finish_reason": "stop"}],
-    }
-
-
-def _parse_stream_line(line: str) -> dict | None:
+def _parse_stream_line(line: str) -> dict:
     try:
         return json.loads(line)
     except json.JSONDecodeError:
-        return None
+        raise ValueError("malformed response from Ollama")
 
 
 def _find_fim_truncation(tail: str, text: str) -> tuple[str | None, str]:
@@ -96,19 +70,50 @@ def _find_fim_truncation(tail: str, text: str) -> tuple[str | None, str]:
     return None, combined[-2:]
 
 
-def _stream_chat(payload: dict, model: str) -> Iterator[str]:
-    chat_id = f"chatcmpl-{uuid.uuid4().hex}"
-    with ollama_client.post_stream("/api/chat", payload) as lines:
+def _truncate_fim_text(text: str) -> str:
+    stop = text.find("\n\n")
+    return text[:stop] if stop != -1 else text
+
+
+def _iter_completion_text(payload: dict) -> Iterator[str]:
+    """Yield raw FIM text chunks from Ollama, stopping at \\n\\n after real content."""
+    has_content = False
+    tail = ""
+    with ollama_client.post_stream("/api/generate", payload) as lines:
         for line in lines:
             if not line:
                 continue
             data = _parse_stream_line(line)
-            if data is None:
-                yield _SSE_OLLAMA_ERROR
-                return
-            chunk = _format_chat_chunk(data, model, chat_id)
-            if chunk:
-                yield f"data: {json.dumps(chunk)}\n\n"
+            if data.get("done"):
+                break
+            text = data.get("response", "")
+            if not text:
+                continue
+            if text.strip():
+                has_content = True
+            if has_content:
+                before_stop, tail = _find_fim_truncation(tail, text)
+                if before_stop is not None:
+                    if before_stop:
+                        yield before_stop
+                    return
+            yield text
+
+
+def _stream_chat(payload: dict, model: str) -> Iterator[str]:
+    chat_id = f"chatcmpl-{uuid.uuid4().hex}"
+    try:
+        with ollama_client.post_stream("/api/chat", payload) as lines:
+            for line in lines:
+                if not line:
+                    continue
+                data = _parse_stream_line(line)
+                chunk = formatting.format_chat_chunk(data, model, chat_id)
+                if chunk:
+                    yield f"data: {json.dumps(chunk)}\n\n"
+    except (OllamaError, ValueError):
+        yield _SSE_OLLAMA_ERROR
+        return
     yield "data: [DONE]\n\n"
 
 
@@ -121,34 +126,13 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
     completion without the runon.
     """
     completion_id = f"cmpl-{uuid.uuid4().hex}"
-    has_content = False
-    tail = ""
-    with ollama_client.post_stream("/api/generate", payload) as lines:
-        for line in lines:
-            if not line:
-                continue
-            data = _parse_stream_line(line)
-            if data is None:
-                yield _SSE_OLLAMA_ERROR
-                return
-            if data.get("done"):
-                break
-            text = data.get("response", "")
-            if not text:
-                continue
-            if text.strip():
-                has_content = True
-            if has_content:
-                before_stop, tail = _find_fim_truncation(tail, text)
-                if before_stop is not None:
-                    chunk = _format_completion_chunk({"response": before_stop}, model, completion_id)
-                    if chunk:
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                    break
-            # pre-content phase or in-progress without stop marker — yield the full chunk
-            chunk = _format_completion_chunk(data, model, completion_id)
-            if chunk:
-                yield f"data: {json.dumps(chunk)}\n\n"
+    try:
+        for text in _iter_completion_text(payload):
+            chunk = formatting.format_completion_chunk(text, model, completion_id)
+            yield f"data: {json.dumps(chunk)}\n\n"
+    except (OllamaError, ValueError):
+        yield _SSE_OLLAMA_ERROR
+        return
     yield "data: [DONE]\n\n"
 
 
@@ -175,4 +159,6 @@ def completions(req: CompletionRequest):
             _stream_completion(payload, req.model), media_type="text/event-stream"
         )
     data = ollama_client.post_json("/api/generate", payload)
-    return _format_completion_response(data, req.model)
+    return formatting.format_completion_response(
+        _truncate_fim_text(data.get("response", "")), req.model
+    )
