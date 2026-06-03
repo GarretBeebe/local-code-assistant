@@ -59,11 +59,12 @@ def test_list_models_empty():
 
 def test_chat_completions_non_streaming():
     mock_response = {"message": {"role": "assistant", "content": "hello"}}
-    with patch.object(ollama_client, "post_json", return_value=mock_response):
-        resp = client.post("/v1/chat/completions", json={
-            "model": "qwen2.5-coder:14b",
-            "messages": [{"role": "user", "content": "hi"}],
-        })
+    with patch.object(ctx_manager, "build_context_prefix", return_value=""):
+        with patch.object(ollama_client, "post_json", return_value=mock_response):
+            resp = client.post("/v1/chat/completions", json={
+                "model": "qwen2.5-coder:14b",
+                "messages": [{"role": "user", "content": "hi"}],
+            })
     assert resp.status_code == 200
     body = resp.json()
     assert body["choices"][0]["message"]["content"] == "hello"
@@ -76,12 +77,13 @@ def test_chat_completions_streaming():
         json.dumps({"message": {"content": "lo"}, "done": False}),
         json.dumps({"done": True}),
     ]
-    with patch.object(ollama_client, "post_stream", _stream(*lines)):
-        resp = client.post("/v1/chat/completions", json={
-            "model": "qwen2.5-coder:14b",
-            "messages": [{"role": "user", "content": "hi"}],
-            "stream": True,
-        })
+    with patch.object(ctx_manager, "build_context_prefix", return_value=""):
+        with patch.object(ollama_client, "post_stream", _stream(*lines)):
+            resp = client.post("/v1/chat/completions", json={
+                "model": "qwen2.5-coder:14b",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            })
     assert resp.status_code == 200
     assert "hel" in resp.text
     assert "lo" in resp.text
@@ -114,6 +116,26 @@ def test_chat_completions_no_prefix_when_rag_empty():
     call_payload = mock_post.call_args[0][1]
     assert call_payload["messages"][0]["role"] == "user"
     assert len(call_payload["messages"]) == 1
+
+
+def test_chat_completions_merges_rag_prefix_with_existing_system_message():
+    mock_response = {"message": {"role": "assistant", "content": "hello"}}
+    with patch.object(ctx_manager, "build_context_prefix", return_value="rag context"):
+        with patch.object(ollama_client, "post_json", return_value=mock_response) as mock_post:
+            resp = client.post("/v1/chat/completions", json={
+                "model": "qwen2.5-coder:14b",
+                "messages": [
+                    {"role": "system", "content": "you are helpful"},
+                    {"role": "user", "content": "hi"},
+                ],
+            })
+    assert resp.status_code == 200
+    call_payload = mock_post.call_args[0][1]
+    assert len(call_payload["messages"]) == 2
+    assert call_payload["messages"][0]["role"] == "system"
+    assert "rag context" in call_payload["messages"][0]["content"]
+    assert "you are helpful" in call_payload["messages"][0]["content"]
+    assert call_payload["messages"][1]["role"] == "user"
 
 
 # --- /v1/completions ---

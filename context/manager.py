@@ -28,8 +28,13 @@ def build_context_prefix(messages: list[ChatMessage]) -> str:
         return ""
     lines = ["Relevant code from your project:\n"]
     for chunk in chunks:
+        text = chunk.get("text", "").strip()
+        if not text:
+            continue
         if chunk.get("filepath"):
             lines.append(f"# {chunk['filepath']}")
-        lines.append(chunk["text"].strip())
+        lines.append(text)
         lines.append("")
+    if len(lines) == 1:
+        return ""
     return "\n".join(lines)

@@ -61,7 +61,10 @@ def list_models() -> dict:
 def _to_ollama_chat(req: ChatRequest, prefix: str = "") -> dict:
     messages = [m.model_dump() for m in req.messages]
     if prefix:
-        messages = [{"role": "system", "content": prefix}] + messages
+        if messages and messages[0]["role"] == "system":
+            messages[0] = {"role": "system", "content": prefix + "\n\n" + messages[0]["content"]}
+        else:
+            messages = [{"role": "system", "content": prefix}] + messages
     payload: dict = {
         "model": settings.CHAT_MODEL,
         "messages": messages,
@@ -167,6 +170,7 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
 
 @app.post("/v1/chat/completions", dependencies=[Depends(_verify_token)])
 def chat_completions(req: ChatRequest):
+    # RAG lookup blocks until complete (capped by RAG_TIMEOUT_SECONDS) before streaming starts.
     payload = _to_ollama_chat(req, ctx_manager.build_context_prefix(req.messages))
     if req.stream:
         return StreamingResponse(_stream_chat(payload, settings.CHAT_MODEL), media_type="text/event-stream")

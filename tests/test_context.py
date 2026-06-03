@@ -35,6 +35,15 @@ def test_retrieve_chunks_returns_empty_on_exception(rag_configured):
         assert rag_client.retrieve_chunks("hello") == []
 
 
+def test_retrieve_chunks_returns_empty_when_chunks_not_a_list(rag_configured):
+    class FakeResp:
+        def raise_for_status(self): pass
+        def json(self): return {"chunks": "bad response"}
+
+    with patch.object(rag_client._session, "post", return_value=FakeResp()):
+        assert rag_client.retrieve_chunks("foo") == []
+
+
 def test_retrieve_chunks_returns_data_on_success(rag_configured):
     fake_chunks = [{"text": "def foo(): pass", "filepath": "/f.py", "score": 0.9}]
 
@@ -77,11 +86,35 @@ def test_build_query_uses_last_user_and_assistant():
     assert "first question" not in query
 
 
-def test_build_query_truncates_long_messages():
-    long = "x" * 400
-    messages = [ChatMessage(role="user", content=long)]
+def test_build_query_truncates_long_user_message():
+    messages = [ChatMessage(role="user", content="x" * 400)]
     query = ctx_manager._build_query(messages)
-    assert len(query) <= 300
+    assert len(query) == 300
+
+
+def test_build_query_truncates_each_field_independently():
+    # Each field is capped at 300 chars; combined max is 601 (300 + space + 300).
+    messages = [
+        ChatMessage(role="user", content="x" * 400),
+        ChatMessage(role="assistant", content="y" * 400),
+    ]
+    query = ctx_manager._build_query(messages)
+    assert query == "x" * 300 + " " + "y" * 300
+    assert len(query) == 601
+
+
+def test_build_context_prefix_skips_chunk_with_missing_text():
+    chunks = [{"filepath": "/foo.py"}]  # no "text" key
+    with patch.object(rag_client, "retrieve_chunks", return_value=chunks):
+        result = ctx_manager.build_context_prefix([ChatMessage(role="user", content="hi")])
+    assert result == ""
+
+
+def test_build_context_prefix_skips_whitespace_only_text():
+    chunks = [{"text": "   ", "filepath": "/foo.py"}]
+    with patch.object(rag_client, "retrieve_chunks", return_value=chunks):
+        result = ctx_manager.build_context_prefix([ChatMessage(role="user", content="hi")])
+    assert result == ""
 
 
 # --- server integration ---
@@ -101,3 +134,17 @@ def test_to_ollama_chat_unchanged_when_prefix_empty():
     msgs = payload["messages"]
     assert len(msgs) == 1
     assert msgs[0]["role"] == "user"
+
+
+def test_to_ollama_chat_merges_prefix_into_existing_system_message():
+    req = ChatRequest(model="m", messages=[
+        ChatMessage(role="system", content="you are helpful"),
+        ChatMessage(role="user", content="hi"),
+    ])
+    payload = _to_ollama_chat(req, "rag context")
+    msgs = payload["messages"]
+    assert len(msgs) == 2
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"].startswith("rag context")
+    assert "you are helpful" in msgs[0]["content"]
+    assert msgs[1]["role"] == "user"

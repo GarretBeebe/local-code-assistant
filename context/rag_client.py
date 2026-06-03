@@ -24,6 +24,7 @@ def retrieve_chunks(query: str) -> list[Chunk]:
             timeout=settings.RAG_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
-        return resp.json().get("chunks", [])
+        chunks = resp.json().get("chunks", [])
+        return chunks if isinstance(chunks, list) else []
     except Exception:
         return []
