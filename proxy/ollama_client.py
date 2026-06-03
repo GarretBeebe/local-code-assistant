@@ -1,3 +1,4 @@
+import json
 import threading
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
@@ -26,6 +27,8 @@ def _handle_request_errors(timeout: float) -> Generator[None, None, None]:
         raise OllamaError(504, f"Ollama request timed out after {timeout}s")
     except requests.HTTPError as e:
         raise OllamaError(502, f"Ollama returned HTTP {e.response.status_code}")
+    except json.JSONDecodeError:
+        raise OllamaError(502, "malformed response from Ollama")
 
 
 def _session() -> requests.Session:
@@ -52,10 +55,17 @@ def post_json(path: str, payload: dict, timeout: float = settings.OLLAMA_TIMEOUT
         return resp.json()
 
 
+def _safe_lines(lines: Iterator[str]) -> Iterator[str]:
+    try:
+        yield from lines
+    except requests.RequestException as e:
+        raise OllamaError(502, f"Stream interrupted: {e}")
+
+
 @contextmanager
 def post_stream(path: str, payload: dict, timeout: float = settings.OLLAMA_TIMEOUT_SECONDS) -> Iterator[str]:
     with _handle_request_errors(timeout):
         resp = _session().post(_url(path), json=payload, stream=True, timeout=timeout)
         resp.raise_for_status()
     with resp:
-        yield resp.iter_lines(decode_unicode=True)
+        yield _safe_lines(resp.iter_lines(decode_unicode=True))

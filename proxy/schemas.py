@@ -8,18 +8,17 @@ class ChatMessage(BaseModel):
     content: str = Field(min_length=1)
 
 
-class ChatRequest(BaseModel):
+class _BaseRequest(BaseModel):
     model: str = Field(min_length=1)
+    stream: bool = False
+    temperature: float | None = Field(None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(None, gt=0)
+
+
+class ChatRequest(_BaseRequest):
     messages: list[ChatMessage] = Field(min_length=1)
-    stream: bool = False
-    temperature: float | None = Field(None, ge=0.0, le=2.0)
-    max_tokens: int | None = Field(None, gt=0)
 
 
-class CompletionRequest(BaseModel):
-    model: str = Field(min_length=1)
+class CompletionRequest(_BaseRequest):
     prompt: str = Field(min_length=1)
-    stream: bool = False
-    max_tokens: int | None = Field(None, gt=0)
-    temperature: float | None = Field(None, ge=0.0, le=2.0)
     stop: list[str] | None = Field(None, max_length=4)

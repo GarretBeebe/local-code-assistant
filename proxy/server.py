@@ -13,7 +13,8 @@ from proxy.schemas import ChatRequest, CompletionRequest
 
 app = FastAPI()
 
-_SSE_OLLAMA_ERROR = 'data: {"error": {"message": "malformed response from Ollama", "type": "server_error"}}\n\n'
+def _sse_error(message: str) -> str:
+    return f'data: {json.dumps({"error": {"message": message, "type": "server_error"}})}\n\n'
 
 
 @app.exception_handler(OllamaError)
@@ -71,7 +72,10 @@ def _find_fim_truncation(tail: str, text: str) -> tuple[str | None, str]:
 
 
 def _truncate_fim_text(text: str) -> str:
-    stop = text.find("\n\n")
+    content_start = next((i for i, c in enumerate(text) if c.strip()), None)
+    if content_start is None:
+        return text
+    stop = text.find("\n\n", content_start)
     return text[:stop] if stop != -1 else text
 
 
@@ -100,21 +104,37 @@ def _iter_completion_text(payload: dict) -> Iterator[str]:
             yield text
 
 
-def _stream_chat(payload: dict, model: str) -> Iterator[str]:
-    chat_id = f"chatcmpl-{uuid.uuid4().hex}"
+def _wrap_sse_stream(inner: Iterator[str]) -> Iterator[str]:
     try:
-        with ollama_client.post_stream("/api/chat", payload) as lines:
-            for line in lines:
-                if not line:
-                    continue
-                data = _parse_stream_line(line)
-                chunk = formatting.format_chat_chunk(data, model, chat_id)
-                if chunk:
-                    yield f"data: {json.dumps(chunk)}\n\n"
-    except (OllamaError, ValueError):
-        yield _SSE_OLLAMA_ERROR
+        yield from inner
+    except OllamaError as e:
+        yield _sse_error(e.message)
+        return
+    except ValueError as e:
+        yield _sse_error(str(e))
         return
     yield "data: [DONE]\n\n"
+
+
+def _chat_chunks(payload: dict, model: str, chat_id: str) -> Iterator[str]:
+    with ollama_client.post_stream("/api/chat", payload) as lines:
+        for line in lines:
+            if not line:
+                continue
+            data = _parse_stream_line(line)
+            chunk = formatting.format_chat_chunk(data, model, chat_id)
+            if chunk:
+                yield f"data: {json.dumps(chunk)}\n\n"
+
+
+def _stream_chat(payload: dict, model: str) -> Iterator[str]:
+    return _wrap_sse_stream(_chat_chunks(payload, model, f"chatcmpl-{uuid.uuid4().hex}"))
+
+
+def _completion_chunks(payload: dict, model: str, completion_id: str) -> Iterator[str]:
+    for text in _iter_completion_text(payload):
+        chunk = formatting.format_completion_chunk(text, model, completion_id)
+        yield f"data: {json.dumps(chunk)}\n\n"
 
 
 def _stream_completion(payload: dict, model: str) -> Iterator[str]:
@@ -125,15 +145,7 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
     Stopping at the first \\n\\n after real content captures the intended
     completion without the runon.
     """
-    completion_id = f"cmpl-{uuid.uuid4().hex}"
-    try:
-        for text in _iter_completion_text(payload):
-            chunk = formatting.format_completion_chunk(text, model, completion_id)
-            yield f"data: {json.dumps(chunk)}\n\n"
-    except (OllamaError, ValueError):
-        yield _SSE_OLLAMA_ERROR
-        return
-    yield "data: [DONE]\n\n"
+    return _wrap_sse_stream(_completion_chunks(payload, model, f"cmpl-{uuid.uuid4().hex}"))
 
 
 @app.post("/v1/chat/completions")
