@@ -24,3 +24,10 @@ FIM_MAX_TOKENS          = _int("FIM_MAX_TOKENS", "128")
 FIM_DEFAULT_TEMPERATURE = _float("FIM_DEFAULT_TEMPERATURE", "0.1")
 PROXY_PORT              = _int("PROXY_PORT", "8080")
 OLLAMA_TIMEOUT_SECONDS  = _float("OLLAMA_TIMEOUT_SECONDS", "120.0")
+PROXY_AUTH_TOKEN: str | None = os.environ.get("PROXY_AUTH_TOKEN")
+
+_raw_models = os.environ.get("ALLOWED_MODELS", "")
+ALLOWED_MODELS: frozenset[str] | None = (
+    frozenset(m.strip() for m in _raw_models.split(",") if m.strip())
+    if _raw_models else None
+)

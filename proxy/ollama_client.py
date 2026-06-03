@@ -22,7 +22,7 @@ def _handle_request_errors(timeout: float) -> Generator[None, None, None]:
     try:
         yield
     except requests.ConnectionError:
-        raise OllamaError(502, f"Cannot connect to Ollama at {settings.OLLAMA_BASE_URL}")
+        raise OllamaError(502, "Cannot connect to upstream model server")
     except requests.Timeout:
         raise OllamaError(504, f"Ollama request timed out after {timeout}s")
     except requests.HTTPError as e:

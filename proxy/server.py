@@ -1,10 +1,12 @@
 import json
+import secrets
 import time
 import uuid
 from typing import Iterator
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 import settings
 from proxy import fim, formatting, ollama_client
@@ -12,6 +14,25 @@ from proxy.ollama_client import OllamaError
 from proxy.schemas import ChatRequest, CompletionRequest
 
 app = FastAPI()
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def _verify_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
+) -> None:
+    if settings.PROXY_AUTH_TOKEN is None:
+        return
+    if credentials is None or not secrets.compare_digest(
+        credentials.credentials, settings.PROXY_AUTH_TOKEN
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _check_model(model: str) -> None:
+    if settings.ALLOWED_MODELS is not None and model not in settings.ALLOWED_MODELS:
+        raise HTTPException(status_code=400, detail=f"Model not allowed: {model}")
+
 
 def _sse_error(message: str) -> str:
     return f'data: {json.dumps({"error": {"message": message, "type": "server_error"}})}\n\n'
@@ -30,7 +51,7 @@ def healthz() -> dict:
     return {"status": "ok"}
 
 
-@app.get("/v1/models")
+@app.get("/v1/models", dependencies=[Depends(_verify_token)])
 def list_models() -> dict:
     data = ollama_client.get_json("/api/tags")
     models = [
@@ -144,8 +165,9 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
     return _wrap_sse_stream(_completion_chunks(payload, model, f"cmpl-{uuid.uuid4().hex}"))
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(_verify_token)])
 def chat_completions(req: ChatRequest):
+    _check_model(req.model)
     payload = _to_ollama_chat(req)
     if req.stream:
         return StreamingResponse(_stream_chat(payload, req.model), media_type="text/event-stream")
@@ -159,8 +181,9 @@ def chat_completions(req: ChatRequest):
     }
 
 
-@app.post("/v1/completions")
+@app.post("/v1/completions", dependencies=[Depends(_verify_token)])
 def completions(req: CompletionRequest):
+    _check_model(req.model)
     payload = fim.to_ollama_generate(req)
     if req.stream:
         return StreamingResponse(
