@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 import settings
+from context import manager as ctx_manager
 from proxy import fim, formatting, ollama_client
 from proxy.ollama_client import OllamaError
 from proxy.schemas import ChatRequest, CompletionRequest
@@ -58,9 +59,13 @@ def list_models() -> dict:
 
 
 def _to_ollama_chat(req: ChatRequest) -> dict:
+    messages = [m.model_dump() for m in req.messages]
+    prefix = ctx_manager.build_context_prefix(req.messages)
+    if prefix:
+        messages = [{"role": "system", "content": prefix}] + messages
     payload: dict = {
         "model": settings.CHAT_MODEL,
-        "messages": [m.model_dump() for m in req.messages],
+        "messages": messages,
         "stream": req.stream,
         "options": {"num_ctx": settings.CHAT_NUM_CTX},
     }

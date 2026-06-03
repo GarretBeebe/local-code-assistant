@@ -20,7 +20,11 @@ Continue.dev (VS Code / JetBrains)
 │  /v1/chat/completions├──► Ollama /api/chat
 │  /v1/completions     ├──► Ollama /api/generate
 │  /v1/models          ├──► Ollama /api/tags
-└──────────────────────┘
+└──────────┬───────────┘
+           │  POST /v1/retrieve (optional, RAG_BASE_URL)
+           ▼
+   rag-system (port 8000)
+   Qdrant code index
         │
         ▼
    Ollama (host :11434)
@@ -35,22 +39,19 @@ Continue.dev (VS Code / JetBrains)
 - `/v1/models` passthrough
 - Continue.dev connected, autocomplete + chat working end-to-end
 
-**v2 — Context injection 🔲**
-- `tree-sitter-languages` parses Python, TypeScript, JavaScript
-- watchdog watcher populates SQLite symbol store
-- Context manager injects top-N relevant signatures into system prompt
-- Success metric: fewer "undefined symbol" mistakes in chat completions
+**v2 — Symbol indexer ⛔ superseded**
+- Superseded by v4. `rag-system` already continuously indexes `/watch/Code` via Qdrant, making a parallel watcher/tree-sitter/SQLite stack redundant.
 
-**v3 — Dual-model routing 🔲**
+**v3 — Dual-model routing ✅ complete**
 - `/v1/completions` (FIM) explicitly routed to `qwen2.5-coder:7b`
 - `/v1/chat/completions` explicitly routed to `qwen2.5-coder:14b`
 - FIM-specific generation options: `temperature=0.1`, `num_predict=128`, `num_ctx=4096`
-- Success metric: autocomplete p50 latency < 1.5s
 
-**v4 — RAG bridge 🔲**
-- For chat requests, query Qdrant (`localhost:6333`) for relevant document chunks
-- Append top-2 chunks to system prompt alongside symbol context
-- Designed for co-location with [`rag-system`](https://github.com/GarretBeebe/rag-system)
+**v4 — RAG context injection ✅ complete**
+- Chat completions query `rag-system`'s `/v1/retrieve` endpoint and inject the top-N code chunks as a system prompt prefix
+- Query is built from the last user message + last assistant message (truncated to 300 chars each) so follow-up questions carry context
+- Opt-in: disabled by default; enable by setting `RAG_BASE_URL` and `RAG_INTERNAL_TOKEN`
+- FIM/autocomplete requests are unaffected; latency impact is capped by `RAG_TIMEOUT_SECONDS` (default 1.5s)
 
 ## Quickstart (Docker)
 
@@ -69,6 +70,26 @@ Pull the models if you haven't already:
 ollama pull qwen2.5-coder:14b   # chat / edit
 ollama pull qwen2.5-coder:7b    # FIM autocomplete
 ```
+
+## RAG Context Injection (v4)
+
+When co-located with [`rag-system`](https://github.com/GarretBeebe/rag-system), the proxy can retrieve relevant code chunks from its Qdrant index and inject them as a system prompt prefix on every chat completion.
+
+**Enable it** by adding to `.env`:
+
+```
+RAG_BASE_URL=http://localhost:8000        # rag-system address
+RAG_INTERNAL_TOKEN=<shared secret>        # must match RAG_INTERNAL_TOKEN in rag-system's .env
+RAG_CONTEXT_CHUNKS=3                      # chunks to inject (default: 3)
+RAG_TIMEOUT_SECONDS=1.5                   # max wait before degrading gracefully (default: 1.5)
+```
+
+Generate the shared secret:
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+Leave `RAG_BASE_URL` empty (the default) to disable the feature entirely — the proxy behaves identically to v1/v3 with no dependency on rag-system.
 
 ## Testing
 
@@ -119,4 +140,4 @@ Set `apiKey` to your `PROXY_AUTH_TOKEN` value (or any string if auth is disabled
 
 ## Related Projects
 
-- [`rag-system`](https://github.com/GarretBeebe/rag-system) — document RAG pipeline, shares infrastructure patterns (PollingObserver watcher, Ollama client, SQLite fingerprint store)
+- [`rag-system`](https://github.com/GarretBeebe/rag-system) — document and code RAG pipeline; v4 context injection queries its `/v1/retrieve` endpoint to inject relevant code chunks into chat completions
