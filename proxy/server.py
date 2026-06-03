@@ -30,8 +30,10 @@ def _verify_token(
 
 
 def _check_model(model: str) -> None:
+    """Must be called explicitly in each handler — model lives in the request body,
+    so FastAPI cannot inject this as a path/query dependency automatically."""
     if settings.ALLOWED_MODELS is not None and model not in settings.ALLOWED_MODELS:
-        raise HTTPException(status_code=400, detail=f"Model not allowed: {model}")
+        raise HTTPException(status_code=403, detail=f"Model not allowed: {model}")
 
 
 def _sse_error(message: str) -> str:
@@ -57,6 +59,7 @@ def list_models() -> dict:
     models = [
         {"id": m["name"], "object": "model", "created": 0, "owned_by": "local"}
         for m in data.get("models", [])
+        if settings.ALLOWED_MODELS is None or m["name"] in settings.ALLOWED_MODELS
     ]
     return {"object": "list", "data": models}
 
@@ -86,7 +89,7 @@ def _find_fim_truncation(tail: str, text: str) -> tuple[str | None, str]:
     """Detect \\n\\n after real content, across chunk boundaries. Returns (text_before_stop, new_tail).
     text_before_stop is None when no stop marker is found."""
     combined = tail + text
-    content_start = next((i for i, c in enumerate(combined) if c.strip()), None)
+    content_start = next((i for i, c in enumerate(combined) if not c.isspace()), None)
     if content_start is None:
         return None, combined[-2:]
     stop = combined.find("\n\n", content_start)
@@ -177,7 +180,7 @@ def chat_completions(req: ChatRequest):
         "object": "chat.completion",
         "created": int(time.time()),
         "model": req.model,
-        "choices": [{"index": 0, "message": data["message"], "finish_reason": "stop"}],
+        "choices": [{"index": 0, "message": data.get("message", {}), "finish_reason": "stop"}],
     }
 
 

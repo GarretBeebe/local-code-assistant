@@ -2,12 +2,20 @@ import json
 from contextlib import contextmanager
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 import proxy.ollama_client as ollama_client
+import settings
 from proxy.server import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def reset_settings(monkeypatch):
+    monkeypatch.setattr(settings, "PROXY_AUTH_TOKEN", None)
+    monkeypatch.setattr(settings, "ALLOWED_MODELS", None)
 
 
 def _stream(*lines):
@@ -188,3 +196,50 @@ def test_completions_non_streaming_leading_blank_lines_not_truncated():
         resp = client.post("/v1/completions", json={"model": "qwen2.5-coder:7b", "prompt": "p"})
     assert resp.status_code == 200
     assert "code" in resp.json()["choices"][0]["text"]
+
+
+# --- auth ---
+
+def test_auth_required(monkeypatch):
+    monkeypatch.setattr(settings, "PROXY_AUTH_TOKEN", "secret")
+    resp = client.get("/v1/models")
+    assert resp.status_code == 401
+
+
+def test_auth_valid_token(monkeypatch):
+    mock_tags = {"models": []}
+    monkeypatch.setattr(settings, "PROXY_AUTH_TOKEN", "secret")
+    with patch.object(ollama_client, "get_json", return_value=mock_tags):
+        resp = client.get("/v1/models", headers={"Authorization": "Bearer secret"})
+    assert resp.status_code == 200
+
+
+def test_auth_invalid_token(monkeypatch):
+    monkeypatch.setattr(settings, "PROXY_AUTH_TOKEN", "secret")
+    resp = client.get("/v1/models", headers={"Authorization": "Bearer wrong"})
+    assert resp.status_code == 401
+
+
+# --- model allowlist ---
+
+def test_model_blocked(monkeypatch):
+    monkeypatch.setattr(settings, "ALLOWED_MODELS", frozenset({"allowed-model"}))
+    resp = client.post("/v1/completions", json={"model": "blocked-model", "prompt": "p"})
+    assert resp.status_code == 403
+
+
+def test_model_allowed(monkeypatch):
+    monkeypatch.setattr(settings, "ALLOWED_MODELS", frozenset({"qwen2.5-coder:7b"}))
+    with patch.object(ollama_client, "post_json", return_value={"response": "ok"}):
+        resp = client.post("/v1/completions", json={"model": "qwen2.5-coder:7b", "prompt": "p"})
+    assert resp.status_code == 200
+
+
+def test_list_models_filtered_by_allowlist(monkeypatch):
+    mock_tags = {"models": [{"name": "allowed"}, {"name": "blocked"}]}
+    monkeypatch.setattr(settings, "ALLOWED_MODELS", frozenset({"allowed"}))
+    with patch.object(ollama_client, "get_json", return_value=mock_tags):
+        resp = client.get("/v1/models")
+    assert resp.status_code == 200
+    ids = [m["id"] for m in resp.json()["data"]]
+    assert ids == ["allowed"]

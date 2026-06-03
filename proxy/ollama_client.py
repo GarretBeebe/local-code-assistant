@@ -63,9 +63,10 @@ def _safe_lines(lines: Iterator[str]) -> Iterator[str]:
 
 
 @contextmanager
-def post_stream(path: str, payload: dict, timeout: float = settings.OLLAMA_TIMEOUT_SECONDS) -> Iterator[str]:
+def post_stream(path: str, payload: dict, timeout: float = settings.OLLAMA_TIMEOUT_SECONDS) -> Generator[Iterator[str], None, None]:
     with _handle_request_errors(timeout):
         resp = _session().post(_url(path), json=payload, stream=True, timeout=timeout)
-        resp.raise_for_status()
     with resp:
+        with _handle_request_errors(timeout):
+            resp.raise_for_status()
         yield _safe_lines(resp.iter_lines(decode_unicode=True))
