@@ -78,7 +78,7 @@ When co-located with [`rag-system`](https://github.com/GarretBeebe/rag-system), 
 **Enable it** by adding to `.env`:
 
 ```
-RAG_BASE_URL=http://localhost:8000        # rag-system address
+RAG_BASE_URL=http://rag-api:8000          # rag-system container name (see networking step below)
 RAG_INTERNAL_TOKEN=<shared secret>        # must match RAG_INTERNAL_TOKEN in rag-system's .env
 RAG_CONTEXT_CHUNKS=3                      # chunks to inject (default: 3)
 RAG_TIMEOUT_SECONDS=1.5                   # max wait before degrading gracefully (default: 1.5)
@@ -88,6 +88,16 @@ Generate the shared secret:
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
+
+**Docker networking (manual step):** the two stacks run on separate Docker networks by default. After both are up, connect them once so the proxy can reach `rag-api` by container name:
+
+```bash
+docker network create rag-bridge
+docker network connect rag-bridge rag-api
+docker network connect rag-bridge local-code-assistant-proxy-1
+```
+
+This step is not required on every restart — the containers rejoin the network automatically as long as `rag-bridge` exists. To disconnect, run `docker network disconnect rag-bridge <container>`.
 
 Leave `RAG_BASE_URL` empty (the default) to disable the feature entirely — the proxy behaves identically to v1/v3 with no dependency on rag-system.
 

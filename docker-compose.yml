@@ -8,13 +8,5 @@ services:
         required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    networks:
-      - default
-      - rag-bridge
     environment:
       OLLAMA_BASE_URL: http://host.docker.internal:11434
-
-networks:
-  default: {}
-  rag-bridge:
-    external: true
