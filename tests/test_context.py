@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import pytest
+
 import settings
 from context import manager as ctx_manager
 from context import rag_client
@@ -21,17 +23,19 @@ def test_retrieve_chunks_disabled_when_no_token(monkeypatch):
     assert rag_client.retrieve_chunks("hello") == []
 
 
-def test_retrieve_chunks_returns_empty_on_exception(monkeypatch):
+@pytest.fixture
+def rag_configured(monkeypatch):
     monkeypatch.setattr(settings, "RAG_BASE_URL", "http://localhost:8000")
     monkeypatch.setattr(settings, "RAG_INTERNAL_TOKEN", "tok")
+    monkeypatch.setattr(settings, "RAG_CONTEXT_CHUNKS", 3)
+
+
+def test_retrieve_chunks_returns_empty_on_exception(rag_configured):
     with patch.object(rag_client._session, "post", side_effect=ConnectionError("down")):
         assert rag_client.retrieve_chunks("hello") == []
 
 
-def test_retrieve_chunks_returns_data_on_success(monkeypatch):
-    monkeypatch.setattr(settings, "RAG_BASE_URL", "http://localhost:8000")
-    monkeypatch.setattr(settings, "RAG_INTERNAL_TOKEN", "tok")
-    monkeypatch.setattr(settings, "RAG_CONTEXT_CHUNKS", 3)
+def test_retrieve_chunks_returns_data_on_success(rag_configured):
     fake_chunks = [{"text": "def foo(): pass", "filepath": "/f.py", "score": 0.9}]
 
     class FakeResp:
@@ -84,8 +88,7 @@ def test_build_query_truncates_long_messages():
 
 def test_to_ollama_chat_prepends_system_message_when_prefix_nonempty():
     req = ChatRequest(model="m", messages=[ChatMessage(role="user", content="hi")])
-    with patch.object(ctx_manager, "build_context_prefix", return_value="some context"):
-        payload = _to_ollama_chat(req)
+    payload = _to_ollama_chat(req, "some context")
     msgs = payload["messages"]
     assert msgs[0]["role"] == "system"
     assert msgs[0]["content"] == "some context"
@@ -94,8 +97,7 @@ def test_to_ollama_chat_prepends_system_message_when_prefix_nonempty():
 
 def test_to_ollama_chat_unchanged_when_prefix_empty():
     req = ChatRequest(model="m", messages=[ChatMessage(role="user", content="hi")])
-    with patch.object(ctx_manager, "build_context_prefix", return_value=""):
-        payload = _to_ollama_chat(req)
+    payload = _to_ollama_chat(req, "")
     msgs = payload["messages"]
     assert len(msgs) == 1
     assert msgs[0]["role"] == "user"

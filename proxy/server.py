@@ -58,9 +58,8 @@ def list_models() -> dict:
     return {"object": "list", "data": models}
 
 
-def _to_ollama_chat(req: ChatRequest) -> dict:
+def _to_ollama_chat(req: ChatRequest, prefix: str = "") -> dict:
     messages = [m.model_dump() for m in req.messages]
-    prefix = ctx_manager.build_context_prefix(req.messages)
     if prefix:
         messages = [{"role": "system", "content": prefix}] + messages
     payload: dict = {
@@ -168,7 +167,7 @@ def _stream_completion(payload: dict, model: str) -> Iterator[str]:
 
 @app.post("/v1/chat/completions", dependencies=[Depends(_verify_token)])
 def chat_completions(req: ChatRequest):
-    payload = _to_ollama_chat(req)
+    payload = _to_ollama_chat(req, ctx_manager.build_context_prefix(req.messages))
     if req.stream:
         return StreamingResponse(_stream_chat(payload, settings.CHAT_MODEL), media_type="text/event-stream")
     data = ollama_client.post_json("/api/chat", payload)

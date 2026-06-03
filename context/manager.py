@@ -5,8 +5,14 @@ _QUERY_TRUNCATE = 300
 
 
 def _build_query(messages: list[ChatMessage]) -> str:
-    last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
-    last_assistant = next((m.content for m in reversed(messages) if m.role == "assistant"), "")
+    last_user = last_assistant = ""
+    for m in reversed(messages):
+        if m.role == "user" and not last_user:
+            last_user = m.content
+        elif m.role == "assistant" and not last_assistant:
+            last_assistant = m.content
+        if last_user and last_assistant:
+            break
     query = last_user[:_QUERY_TRUNCATE]
     if last_assistant:
         query += " " + last_assistant[:_QUERY_TRUNCATE]

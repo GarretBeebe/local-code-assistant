@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import proxy.ollama_client as ollama_client
 import settings
+from context import manager as ctx_manager
 from proxy.server import app
 
 client = TestClient(app)
@@ -85,6 +86,34 @@ def test_chat_completions_streaming():
     assert "hel" in resp.text
     assert "lo" in resp.text
     assert "[DONE]" in resp.text
+
+
+def test_chat_completions_injects_rag_prefix():
+    mock_response = {"message": {"role": "assistant", "content": "hello"}}
+    with patch.object(ctx_manager, "build_context_prefix", return_value="rag context"):
+        with patch.object(ollama_client, "post_json", return_value=mock_response) as mock_post:
+            resp = client.post("/v1/chat/completions", json={
+                "model": "qwen2.5-coder:14b",
+                "messages": [{"role": "user", "content": "hi"}],
+            })
+    assert resp.status_code == 200
+    call_payload = mock_post.call_args[0][1]
+    assert call_payload["messages"][0] == {"role": "system", "content": "rag context"}
+    assert call_payload["messages"][1]["role"] == "user"
+
+
+def test_chat_completions_no_prefix_when_rag_empty():
+    mock_response = {"message": {"role": "assistant", "content": "hello"}}
+    with patch.object(ctx_manager, "build_context_prefix", return_value=""):
+        with patch.object(ollama_client, "post_json", return_value=mock_response) as mock_post:
+            resp = client.post("/v1/chat/completions", json={
+                "model": "qwen2.5-coder:14b",
+                "messages": [{"role": "user", "content": "hi"}],
+            })
+    assert resp.status_code == 200
+    call_payload = mock_post.call_args[0][1]
+    assert call_payload["messages"][0]["role"] == "user"
+    assert len(call_payload["messages"]) == 1
 
 
 # --- /v1/completions ---
