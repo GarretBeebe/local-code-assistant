@@ -73,6 +73,15 @@ def test_build_context_prefix_formats_chunks():
     assert "def foo(): pass" in result
 
 
+def test_build_context_prefix_strips_filepath_prefix(monkeypatch):
+    monkeypatch.setattr(settings, "RAG_FILEPATH_STRIP_PREFIX", "/watch/Code")
+    chunks = [{"text": "def foo(): pass", "filepath": "/watch/Code/foo.py", "score": 0.9}]
+    with patch.object(rag_client, "retrieve_chunks", return_value=chunks):
+        result = ctx_manager.build_context_prefix([ChatMessage(role="user", content="foo")])
+    assert "# /foo.py" in result
+    assert "/watch/Code" not in result
+
+
 def test_build_query_uses_last_user_and_assistant():
     messages = [
         ChatMessage(role="user", content="first question"),

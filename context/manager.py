@@ -1,3 +1,4 @@
+import settings
 from context import rag_client
 from proxy.schemas import ChatMessage
 
@@ -31,8 +32,11 @@ def build_context_prefix(messages: list[ChatMessage]) -> str:
         text = chunk.get("text", "").strip()
         if not text:
             continue
-        if chunk.get("filepath"):
-            lines.append(f"# {chunk['filepath']}")
+        filepath = chunk.get("filepath", "")
+        if filepath and settings.RAG_FILEPATH_STRIP_PREFIX:
+            filepath = filepath.removeprefix(settings.RAG_FILEPATH_STRIP_PREFIX)
+        if filepath:
+            lines.append(f"# {filepath}")
         lines.append(text)
         lines.append("")
     if len(lines) == 1:

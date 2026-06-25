@@ -28,10 +28,11 @@ PROXY_PORT              = _int("PROXY_PORT", "8080")
 OLLAMA_TIMEOUT_SECONDS  = _float("OLLAMA_TIMEOUT_SECONDS", "120.0")
 PROXY_AUTH_TOKEN: str | None = os.environ.get("PROXY_AUTH_TOKEN") or None
 
-RAG_BASE_URL         = os.environ.get("RAG_BASE_URL", "")
-RAG_INTERNAL_TOKEN   = os.environ.get("RAG_INTERNAL_TOKEN") or None
-RAG_CONTEXT_CHUNKS   = _int("RAG_CONTEXT_CHUNKS", "3")
-RAG_TIMEOUT_SECONDS  = _float("RAG_TIMEOUT_SECONDS", "1.5")
+RAG_BASE_URL              = os.environ.get("RAG_BASE_URL", "")
+RAG_INTERNAL_TOKEN        = os.environ.get("RAG_INTERNAL_TOKEN") or None
+RAG_CONTEXT_CHUNKS        = _int("RAG_CONTEXT_CHUNKS", "3")
+RAG_TIMEOUT_SECONDS       = _float("RAG_TIMEOUT_SECONDS", "1.5")
+RAG_FILEPATH_STRIP_PREFIX = os.environ.get("RAG_FILEPATH_STRIP_PREFIX", "")
 
 _raw_models = os.environ.get("ALLOWED_MODELS", "")
 _parsed_models = frozenset(m.strip() for m in _raw_models.split(",") if m.strip()) if _raw_models else None

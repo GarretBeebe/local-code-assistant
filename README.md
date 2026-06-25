@@ -78,7 +78,15 @@ When co-located with [`rag-system`](https://github.com/GarretBeebe/rag-system), 
 **Enable it** by adding to `.env`:
 
 ```
-RAG_BASE_URL=http://rag-api:8000          # rag-system container name (see networking step below)
+# Native / systemd deployment:
+RAG_BASE_URL=http://localhost:8000
+
+# Docker: both services in containers connected via rag-bridge (see networking step below):
+# RAG_BASE_URL=http://rag-api:8000
+
+# Docker: rag-system on the host, code-assistant in a container:
+# RAG_BASE_URL=http://host.docker.internal:8000
+
 RAG_INTERNAL_TOKEN=<shared secret>        # must match RAG_INTERNAL_TOKEN in rag-system's .env
 RAG_CONTEXT_CHUNKS=3                      # chunks to inject (default: 3)
 RAG_TIMEOUT_SECONDS=1.5                   # max wait before degrading gracefully (default: 1.5)
