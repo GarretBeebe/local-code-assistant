@@ -3,6 +3,7 @@ from context import rag_client
 from proxy.schemas import ChatMessage
 
 _QUERY_TRUNCATE = 300
+_MAX_CHUNK_CHARS = 2000
 
 
 def _build_query(messages: list[ChatMessage]) -> str:
@@ -29,15 +30,19 @@ def build_context_prefix(messages: list[ChatMessage]) -> str:
         return ""
     lines = ["Relevant code from your project:\n"]
     for chunk in chunks:
-        text = chunk.get("text", "").strip()
-        if not text:
+        if not isinstance(chunk, dict):
             continue
-        filepath = chunk.get("filepath", "")
+        text = chunk.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        filepath = chunk.get("filepath")
+        if not isinstance(filepath, str):
+            filepath = ""
         if filepath and settings.RAG_FILEPATH_STRIP_PREFIX:
             filepath = filepath.removeprefix(settings.RAG_FILEPATH_STRIP_PREFIX)
         if filepath:
             lines.append(f"# {filepath}")
-        lines.append(text)
+        lines.append(text.strip()[:_MAX_CHUNK_CHARS])
         lines.append("")
     if len(lines) == 1:
         return ""

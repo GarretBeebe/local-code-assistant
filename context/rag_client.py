@@ -1,5 +1,3 @@
-from typing import TypedDict
-
 import requests
 
 import settings
@@ -7,12 +5,7 @@ import settings
 _session = requests.Session()
 
 
-class Chunk(TypedDict):
-    text: str
-    filepath: str
-
-
-def retrieve_chunks(query: str) -> list[Chunk]:
+def retrieve_chunks(query: str) -> list[dict]:
     """Return chunks from rag-system, or [] if unavailable or not configured."""
     if not settings.RAG_BASE_URL or not settings.RAG_INTERNAL_TOKEN:
         return []

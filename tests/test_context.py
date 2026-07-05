@@ -5,8 +5,7 @@ import pytest
 import settings
 from context import manager as ctx_manager
 from context import rag_client
-from proxy.schemas import ChatMessage, ChatRequest
-from proxy.server import _to_ollama_chat
+from proxy.schemas import ChatMessage
 
 
 def _fake_resp(chunks) -> object:
@@ -125,34 +124,25 @@ def test_build_context_prefix_skips_whitespace_only_text():
     assert result == ""
 
 
-# --- server integration ---
-
-def test_to_ollama_chat_prepends_system_message_when_prefix_nonempty():
-    req = ChatRequest(model="m", messages=[ChatMessage(role="user", content="hi")])
-    payload = _to_ollama_chat(req, "some context")
-    msgs = payload["messages"]
-    assert msgs[0]["role"] == "system"
-    assert msgs[0]["content"] == "some context"
-    assert msgs[1]["role"] == "user"
+def test_build_context_prefix_skips_malformed_chunk_elements():
+    # A malformed rag-system response must degrade to no context, never crash the request.
+    chunks = ["bare string", {"text": None, "filepath": "/a.py"}, {"text": 123}, 42]
+    with patch.object(rag_client, "retrieve_chunks", return_value=chunks):
+        result = ctx_manager.build_context_prefix([ChatMessage(role="user", content="hi")])
+    assert result == ""
 
 
-def test_to_ollama_chat_unchanged_when_prefix_empty():
-    req = ChatRequest(model="m", messages=[ChatMessage(role="user", content="hi")])
-    payload = _to_ollama_chat(req, "")
-    msgs = payload["messages"]
-    assert len(msgs) == 1
-    assert msgs[0]["role"] == "user"
+def test_build_context_prefix_keeps_valid_chunk_among_malformed():
+    chunks = ["junk", {"text": "def ok(): pass", "filepath": "/ok.py"}, {"text": None}]
+    with patch.object(rag_client, "retrieve_chunks", return_value=chunks):
+        result = ctx_manager.build_context_prefix([ChatMessage(role="user", content="hi")])
+    assert "def ok(): pass" in result
+    assert "# /ok.py" in result
 
 
-def test_to_ollama_chat_merges_prefix_into_existing_system_message():
-    req = ChatRequest(model="m", messages=[
-        ChatMessage(role="system", content="you are helpful"),
-        ChatMessage(role="user", content="hi"),
-    ])
-    payload = _to_ollama_chat(req, "rag context")
-    msgs = payload["messages"]
-    assert len(msgs) == 2
-    assert msgs[0]["role"] == "system"
-    assert msgs[0]["content"].startswith("rag context")
-    assert "you are helpful" in msgs[0]["content"]
-    assert msgs[1]["role"] == "user"
+def test_build_context_prefix_truncates_oversized_chunk_text():
+    chunks = [{"text": "x" * 5000, "filepath": "/big.py"}]
+    with patch.object(rag_client, "retrieve_chunks", return_value=chunks):
+        result = ctx_manager.build_context_prefix([ChatMessage(role="user", content="hi")])
+    assert "x" * ctx_manager._MAX_CHUNK_CHARS in result
+    assert "x" * (ctx_manager._MAX_CHUNK_CHARS + 1) not in result

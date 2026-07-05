@@ -133,7 +133,7 @@ def test_chat_completions_merges_rag_prefix_with_existing_system_message():
     call_payload = mock_post.call_args[0][1]
     assert len(call_payload["messages"]) == 2
     assert call_payload["messages"][0]["role"] == "system"
-    assert "rag context" in call_payload["messages"][0]["content"]
+    assert call_payload["messages"][0]["content"].startswith("rag context")
     assert "you are helpful" in call_payload["messages"][0]["content"]
     assert call_payload["messages"][1]["role"] == "user"
 
