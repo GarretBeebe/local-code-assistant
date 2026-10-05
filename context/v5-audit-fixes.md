@@ -483,24 +483,34 @@ Cold loads were 31.2 s for 7b, 2.9 s for 3b, and 2.1 s for 1.5b.
 
 - The device-to-host copy is slow once the Vulkan iGPU has idled.
 
-**Fix**
+**Change**
 - Ollama starts llama-server without `--cache-ram`. llama-server reads the option from
   `LLAMA_ARG_CACHE_RAM` (per `llama-server.exe --help`).
 - Setting the Windows user environment variable `LLAMA_ARG_CACHE_RAM=0` and restarting Ollama
   makes llama-server log "prompt cache is disabled".
 
-**Result** (3 minutes idle, then one FIM request through the proxy):
+**Result: two separate effects.** Each row is one FIM request through the proxy, with the cache
+off, after an idle gap. No other Ollama or proxy traffic hit any of these windows:
 
-| | Cache on | Cache off |
+| Idle before request | Time to first token | Prefill |
 |---|---|---|
-| Time to first token | 2,263 ms | 187 ms |
-| Ollama request time | 2.58 s | 0.58 s |
-| Cache save | 2,118 ms | none |
-| Prefill | 38 ms | 155 ms |
+| 3 min | 187 ms | 155 ms |
+| 5 min | 217 ms | 188 ms |
+| 5 min | 226 ms | 196 ms |
+| ~19 min | 2,288 ms | 2,173 ms |
+| ~52 min | 2,288 ms | 2,161 ms |
 
-- The cost did not move into prefill.
+- **Short pauses (seconds up to at least 5 minutes): fixed.** With the cache on, the save alone
+  cost 1.1 s after 5–60 s idle and about 2.1 s after 1–10 minutes. With it off, the first request
+  takes about 0.2 s. Keep the setting.
+- **Long breaks (about 20 minutes or more): not fixed.** The iGPU drops into a deep power state,
+  and the first request still pays about 2.2 s once, now in prefill. Switching the Windows power
+  mode from "Balanced" to "Best performance" might help; that is untested.
 - During sustained requests, time to first token is about 60 ms. The first one or two requests
   after a pause add 150–400 ms while the iGPU clocks ramp up.
+- *Correction:* the first version of this section (commit `7886213`) concluded, from a single
+  3-minute sample, that the setting removed the idle delay entirely and that "the cost did not move
+  into prefill". The repeated measurements above show that only holds for short pauses.
 
 **Trade-offs and notes**
 - llama-server no longer restores older prompts from RAM, for every model this Ollama serves. That
