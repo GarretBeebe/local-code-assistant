@@ -1,0 +1,13 @@
+# Secrets: .env is supplied at runtime via compose env_file, never baked into the image
+.env*
+
+# Host environment and tooling — the image builds its own venv from uv.lock
+.venv
+.git
+.claude
+.pytest_cache
+.ruff_cache
+**/__pycache__
+
+# Not needed at runtime
+tests

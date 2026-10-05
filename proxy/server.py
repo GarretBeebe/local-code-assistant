@@ -1,25 +1,34 @@
 import json
+import logging
+import re
 import secrets
 import time
 import uuid
-from typing import Iterator
+from collections.abc import AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 import settings
-from context import manager as ctx_manager
 from proxy import fim, formatting, ollama_client
 from proxy.ollama_client import OllamaError
 from proxy.schemas import ChatRequest, CompletionRequest
+
+# uvicorn configures only its own loggers; without a root handler our lines would be dropped.
+logging.basicConfig(format="%(levelname)s:     %(message)s")
+log = logging.getLogger("proxy")
+log.setLevel(logging.INFO)
 
 app = FastAPI()
 
 _bearer = HTTPBearer(auto_error=False)
 
+# A blank line, possibly indented or CRLF: the same test as Continue's noDoubleNewLine.
+_BLANK_LINE = re.compile(r"\r?\n[ \t]*\r?\n")
 
-def _verify_token(
+
+async def _verify_token(
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
 ) -> None:
     if settings.PROXY_AUTH_TOKEN is None:
@@ -28,10 +37,6 @@ def _verify_token(
         credentials.credentials, settings.PROXY_AUTH_TOKEN
     ):
         raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-def _sse_error(message: str) -> str:
-    return f'data: {json.dumps({"error": {"message": message, "type": "server_error"}})}\n\n'
 
 
 @app.exception_handler(OllamaError)
@@ -49,26 +54,20 @@ def healthz() -> dict:
 
 @app.get("/v1/models", dependencies=[Depends(_verify_token)])
 def list_models() -> dict:
-    data = ollama_client.get_json("/api/tags")
-    models = [
-        {"id": m["name"], "object": "model", "created": 0, "owned_by": "local"}
-        for m in data.get("models", [])
-        if settings.ALLOWED_MODELS is None or m["name"] in settings.ALLOWED_MODELS
-    ]
-    return {"object": "list", "data": models}
+    # Every request is routed to one of these two models, whatever model the client names.
+    return {
+        "object": "list",
+        "data": [
+            {"id": m, "object": "model", "created": 0, "owned_by": "local"}
+            for m in dict.fromkeys([settings.CHAT_MODEL, settings.FIM_MODEL])
+        ],
+    }
 
 
-def _to_ollama_chat(req: ChatRequest, prefix: str = "") -> dict:
-    messages = [m.model_dump() for m in req.messages]
-    if prefix:
-        if messages and messages[0]["role"] == "system":
-            messages[0] = {"role": "system", "content": prefix + "\n\n" + messages[0]["content"]}
-        else:
-            messages = [{"role": "system", "content": prefix}] + messages
+def _to_ollama_chat(req: ChatRequest) -> dict:
     payload: dict = {
         "model": settings.CHAT_MODEL,
-        "messages": messages,
-        "stream": req.stream,
+        "messages": [m.model_dump() for m in req.messages],
         "options": {"num_ctx": settings.CHAT_NUM_CTX},
     }
     if req.temperature is not None:
@@ -78,120 +77,137 @@ def _to_ollama_chat(req: ChatRequest, prefix: str = "") -> dict:
     return payload
 
 
-def _parse_stream_line(line: str) -> dict:
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError:
-        raise ValueError("malformed response from Ollama")
+def _fim_stop(text: str) -> int:
+    """Index of the first blank line after real content in text, or -1."""
+    match = _BLANK_LINE.search(text, len(text) - len(text.lstrip()))
+    return match.start() if match else -1
 
 
-def _find_fim_truncation(tail: str, text: str) -> tuple[str | None, str]:
-    """Detect \\n\\n after real content, across chunk boundaries. Returns (text_before_stop, new_tail).
-    text_before_stop is None when no stop marker is found."""
-    combined = tail + text
-    content_start = next((i for i, c in enumerate(combined) if not c.isspace()), None)
-    if content_start is None:
-        return None, combined[-2:]
-    stop = combined.find("\n\n", content_start)
-    if stop != -1:
-        return combined[len(tail):stop], ""
-    return None, combined[-2:]
+async def _fim_text(payload: dict, done: dict) -> AsyncIterator[str]:
+    """Yield FIM text, stopping at the first blank line after real content.
 
-
-def _truncate_fim_text(text: str) -> str:
-    before_stop, _ = _find_fim_truncation("", text)
-    return before_stop if before_stop is not None else text
-
-
-def _iter_completion_text(payload: dict) -> Iterator[str]:
-    """Yield raw FIM text chunks from Ollama, stopping at \\n\\n after real content."""
-    tail = ""
-    with ollama_client.post_stream("/api/generate", payload) as lines:
-        for line in lines:
-            if not line:
-                continue
-            data = _parse_stream_line(line)
-            if data.get("done"):
-                break
-            text = data.get("response", "")
-            if not text:
-                continue
-            before_stop, tail = _find_fim_truncation(tail, text)
-            if before_stop is not None:
-                if before_stop:
-                    yield before_stop
-                return
-            yield text
-
-
-def _wrap_sse_stream(inner: Iterator[str]) -> Iterator[str]:
-    try:
-        yield from inner
-    except OllamaError as e:
-        yield _sse_error(e.message)
-        return
-    except ValueError as e:
-        yield _sse_error(str(e))
-        return
-    yield "data: [DONE]\n\n"
-
-
-def _chat_chunks(payload: dict, model: str, chat_id: str) -> Iterator[str]:
-    with ollama_client.post_stream("/api/chat", payload) as lines:
-        for line in lines:
-            if not line:
-                continue
-            data = _parse_stream_line(line)
-            chunk = formatting.format_chat_chunk(data, model, chat_id)
-            if chunk:
-                yield f"data: {json.dumps(chunk)}\n\n"
-
-
-def _stream_chat(payload: dict, model: str) -> Iterator[str]:
-    return _wrap_sse_stream(_chat_chunks(payload, model, f"chatcmpl-{uuid.uuid4().hex}"))
-
-
-def _completion_chunks(payload: dict, model: str, completion_id: str) -> Iterator[str]:
-    for text in _iter_completion_text(payload):
-        chunk = formatting.format_completion_chunk(text, model, completion_id)
-        yield f"data: {json.dumps(chunk)}\n\n"
-
-
-def _stream_completion(payload: dict, model: str) -> Iterator[str]:
-    """Stream FIM completion, stopping at double-newline.
-
-    qwen2.5-coder Q4 doesn't reliably emit <|endoftext|> to self-terminate
-    FIM completions. Without intervention the model runs into prose.
-    Stopping at the first \\n\\n after real content captures the intended
-    completion without the runon.
+    qwen2.5-coder doesn't reliably emit <|endoftext|> to end a FIM completion, so it runs on
+    into prose. Continue makes the same cut client-side but keeps reading the stream in the
+    background, so stopping here is what frees the model. done receives Ollama's final line.
     """
-    return _wrap_sse_stream(_completion_chunks(payload, model, f"cmpl-{uuid.uuid4().hex}"))
+    emitted = ""
+    async with ollama_client.stream("/api/generate", payload) as lines:
+        async for data in lines:
+            text = data.get("response", "")
+            stop = _fim_stop(emitted + text)
+            if stop != -1:
+                if stop > len(emitted):
+                    yield text[: stop - len(emitted)]
+                return
+            if text:
+                yield text
+            emitted += text
+            if data.get("done"):
+                done.update(data)  # keep reading to the end so the connection can be reused
+
+
+async def _chat_text(payload: dict, done: dict) -> AsyncIterator[str]:
+    """Yield chat content from Ollama; done receives Ollama's final line."""
+    async with ollama_client.stream("/api/chat", payload) as lines:
+        async for data in lines:
+            content = data.get("message", {}).get("content", "")
+            if content:
+                yield content
+            if data.get("done"):
+                done.update(data)
+
+
+async def _logged(route: str, texts: AsyncIterator[str], done: dict, **fields) -> AsyncIterator[str]:
+    """Pass text through, logging one line per request when it ends, however it ends.
+
+    Ollama's timings arrive only on its final line, which stopped and cancelled requests never
+    see, so the proxy's own timings are the primary latency signal.
+    """
+    start = time.monotonic()
+    first = None
+    chunks = 0
+    outcome = "cancelled"  # unless the stream finishes or fails below
+    try:
+        async for text in texts:
+            if first is None:
+                first = time.monotonic()
+            chunks += 1
+            yield text
+        outcome = "done" if done else "stopped"
+    except OllamaError:
+        outcome = "error"
+        raise
+    finally:
+        stats = {
+            "outcome": outcome,
+            "ttft_ms": round((first - start) * 1000) if first else None,
+            "total_ms": round((time.monotonic() - start) * 1000),
+            "chunks": chunks,
+            **fields,
+        }
+        if done:
+            stats.update(
+                done_reason=done.get("done_reason"),
+                load_ms=done.get("load_duration", 0) // 1_000_000,  # Ollama reports nanoseconds
+                prompt_tokens=done.get("prompt_eval_count"),
+                prefill_ms=done.get("prompt_eval_duration", 0) // 1_000_000,
+                eval_tokens=done.get("eval_count"),
+                eval_ms=done.get("eval_duration", 0) // 1_000_000,
+            )
+        log.info("%s %s", route, " ".join(f"{k}={v}" for k, v in stats.items()))
+
+
+def _finish_reason(done: dict) -> str:
+    return "length" if done.get("done_reason") == "length" else "stop"
+
+
+async def _sse(chunks: AsyncIterator[dict]) -> AsyncIterator[str]:
+    try:
+        async for chunk in chunks:
+            yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+    except OllamaError as e:
+        error = {"error": {"message": e.message, "type": "server_error"}}
+        yield f"data: {json.dumps(error)}\n\n"
 
 
 @app.post("/v1/chat/completions", dependencies=[Depends(_verify_token)])
-def chat_completions(req: ChatRequest):
-    # RAG lookup blocks until complete (capped by RAG_TIMEOUT_SECONDS) before streaming starts.
-    payload = _to_ollama_chat(req, ctx_manager.build_context_prefix(req.messages))
+async def chat_completions(req: ChatRequest):
+    done: dict = {}
+    texts = _logged(
+        "chat", _chat_text(_to_ollama_chat(req), done), done,
+        messages=len(req.messages), max_tokens=req.max_tokens,
+    )
+    model = settings.CHAT_MODEL
     if req.stream:
-        return StreamingResponse(_stream_chat(payload, settings.CHAT_MODEL), media_type="text/event-stream")
-    data = ollama_client.post_json("/api/chat", payload)
+        chat_id = f"chatcmpl-{uuid.uuid4().hex}"
+        chunks = (formatting.format_chat_chunk(t, model, chat_id) async for t in texts)
+        return StreamingResponse(_sse(chunks), media_type="text/event-stream")
+    content = "".join([t async for t in texts])
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": settings.CHAT_MODEL,
-        "choices": [{"index": 0, "message": data.get("message", {}), "finish_reason": "stop"}],
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": _finish_reason(done),
+        }],
     }
 
 
 @app.post("/v1/completions", dependencies=[Depends(_verify_token)])
-def completions(req: CompletionRequest):
-    payload = fim.to_ollama_generate(req)
-    if req.stream:
-        return StreamingResponse(
-            _stream_completion(payload, settings.FIM_MODEL), media_type="text/event-stream"
-        )
-    data = ollama_client.post_json("/api/generate", payload)
-    return formatting.format_completion_response(
-        _truncate_fim_text(data.get("response", "")), settings.FIM_MODEL
+async def completions(req: CompletionRequest):
+    done: dict = {}
+    texts = _logged(
+        "fim", _fim_text(fim.to_ollama_generate(req), done), done,
+        prompt_chars=len(req.prompt), max_tokens=req.max_tokens, stops=len(req.stop or []),
     )
+    model = settings.FIM_MODEL
+    if req.stream:
+        completion_id = f"cmpl-{uuid.uuid4().hex}"
+        chunks = (formatting.format_completion(t, model, completion_id) async for t in texts)
+        return StreamingResponse(_sse(chunks), media_type="text/event-stream")
+    text = "".join([t async for t in texts])
+    return formatting.format_completion(text, model, f"cmpl-{uuid.uuid4().hex}", _finish_reason(done))

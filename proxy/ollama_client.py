@@ -1,13 +1,16 @@
 import json
-import threading
-from collections.abc import Generator, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
-import requests
+import httpx2
 
 import settings
 
-_local = threading.local()
+# Set the timeout explicitly: httpx2's 5 s default is shorter than a cold model load.
+client = httpx2.AsyncClient(
+    base_url=settings.OLLAMA_BASE_URL,
+    timeout=httpx2.Timeout(settings.OLLAMA_TIMEOUT_SECONDS, connect=5.0),
+)
 
 
 class OllamaError(Exception):
@@ -17,56 +20,37 @@ class OllamaError(Exception):
         super().__init__(message)
 
 
-@contextmanager
-def _handle_request_errors(timeout: float) -> Generator[None, None, None]:
+async def _parse_lines(resp: httpx2.Response) -> AsyncIterator[dict]:
+    async for line in resp.aiter_lines():
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            raise OllamaError(502, "malformed response from Ollama") from None
+        if "error" in data:  # Ollama reports failures after the 200 as an NDJSON line
+            raise OllamaError(502, f"Ollama error: {data['error']}")
+        yield data
+
+
+@asynccontextmanager
+async def stream(path: str, payload: dict) -> AsyncIterator[AsyncIterator[dict]]:
+    """Stream Ollama's NDJSON lines as dicts, the final done line included.
+
+    Leaving the block, whether returning early or cancelled because the client disconnected,
+    closes the upstream connection, which is what makes Ollama stop generating.
+    """
     try:
-        yield
-    except requests.ConnectionError:
-        raise OllamaError(502, "Cannot connect to upstream model server")
-    except requests.Timeout:
-        raise OllamaError(504, f"Ollama request timed out after {timeout}s")
-    except requests.HTTPError as e:
-        raise OllamaError(502, f"Ollama returned HTTP {e.response.status_code}")
-    except json.JSONDecodeError:
-        raise OllamaError(502, "malformed response from Ollama")
-
-
-def _session() -> requests.Session:
-    if not hasattr(_local, "session"):
-        _local.session = requests.Session()
-    return _local.session
-
-
-def _url(path: str) -> str:
-    return f"{settings.OLLAMA_BASE_URL}{path}"
-
-
-def get_json(path: str, timeout: float = settings.OLLAMA_TIMEOUT_SECONDS) -> dict:
-    with _handle_request_errors(timeout):
-        resp = _session().get(_url(path), timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-
-
-def post_json(path: str, payload: dict, timeout: float = settings.OLLAMA_TIMEOUT_SECONDS) -> dict:
-    with _handle_request_errors(timeout):
-        resp = _session().post(_url(path), json=payload, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-
-
-def _safe_lines(lines: Iterator[str]) -> Iterator[str]:
-    try:
-        yield from lines
-    except requests.RequestException as e:
-        raise OllamaError(502, f"Stream interrupted: {e}")
-
-
-@contextmanager
-def post_stream(path: str, payload: dict, timeout: float = settings.OLLAMA_TIMEOUT_SECONDS) -> Generator[Iterator[str], None, None]:
-    with _handle_request_errors(timeout):
-        resp = _session().post(_url(path), json=payload, stream=True, timeout=timeout)
-    with resp:
-        with _handle_request_errors(timeout):
-            resp.raise_for_status()
-        yield _safe_lines(resp.iter_lines(decode_unicode=True))
+        async with client.stream("POST", path, json={**payload, "stream": True}) as resp:
+            if resp.is_error:
+                await resp.aread()
+                raise OllamaError(
+                    502, f"Ollama returned HTTP {resp.status_code}: {resp.text.strip()[:200]}"
+                )
+            yield _parse_lines(resp)
+    except httpx2.TimeoutException:
+        raise OllamaError(
+            504, f"Ollama request timed out after {settings.OLLAMA_TIMEOUT_SECONDS}s"
+        ) from None
+    except httpx2.HTTPError as e:
+        raise OllamaError(502, f"Upstream model server error: {type(e).__name__}") from None

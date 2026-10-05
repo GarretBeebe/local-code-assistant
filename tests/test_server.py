@@ -1,32 +1,65 @@
 import json
-from contextlib import contextmanager
-from unittest.mock import patch
 
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
 import proxy.ollama_client as ollama_client
 import settings
-from context import manager as ctx_manager
 from proxy.server import app
 
 client = TestClient(app)
 
 
+class FakeOllama:
+    """Stands in for Ollama: records request bodies and replies with NDJSON lines."""
+
+    def __init__(self) -> None:
+        self.lines: list[dict | str] = [{"done": True}]
+        self.status = 200
+        self.requests: list[dict] = []
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(json.loads(request.content))
+        body = "".join((ln if isinstance(ln, str) else json.dumps(ln)) + "\n" for ln in self.lines)
+        return httpx2.Response(self.status, text=body)
+
+
+def _use_upstream(monkeypatch, handler) -> None:
+    transport = httpx2.MockTransport(handler)
+    monkeypatch.setattr(ollama_client, "client", httpx2.AsyncClient(base_url="http://ollama", transport=transport))
+
+
 @pytest.fixture(autouse=True)
-def reset_settings(monkeypatch):
+def ollama(monkeypatch) -> FakeOllama:
     monkeypatch.setattr(settings, "PROXY_AUTH_TOKEN", None)
-    monkeypatch.setattr(settings, "ALLOWED_MODELS", None)
+    fake = FakeOllama()
+    _use_upstream(monkeypatch, fake)
+    return fake
 
 
-def _stream(*lines):
-    @contextmanager
-    def _mock(path, payload):
-        yield iter(lines)
-    return _mock
+def _fim(stream: bool = True, **body):
+    return client.post("/v1/completions", json={"model": "m", "prompt": "p", "stream": stream, **body})
 
 
-# --- health ---
+def _chat(stream: bool = False, **body):
+    messages = [{"role": "user", "content": "hi"}]
+    return client.post("/v1/chat/completions", json={"model": "m", "messages": messages, "stream": stream, **body})
+
+
+def _sse_text(resp) -> str:
+    """Concatenate the text of every SSE completion event (FIM text or chat delta)."""
+    out = []
+    for line in resp.text.splitlines():
+        if line.startswith("data: {"):
+            event = json.loads(line[len("data: "):])
+            if "choices" in event:
+                choice = event["choices"][0]
+                out.append(choice.get("text") or choice.get("delta", {}).get("content", ""))
+    return "".join(out)
+
+
+# --- health, models, auth ---
 
 def test_healthz():
     resp = client.get("/healthz")
@@ -34,222 +67,14 @@ def test_healthz():
     assert resp.json() == {"status": "ok"}
 
 
-# --- /v1/models ---
-
-def test_list_models():
-    mock_tags = {"models": [{"name": "qwen2.5-coder:7b"}, {"name": "qwen2.5-coder:14b"}]}
-    with patch.object(ollama_client, "get_json", return_value=mock_tags):
-        resp = client.get("/v1/models")
+def test_list_models_returns_configured_models_without_upstream_call(ollama):
+    resp = client.get("/v1/models")
     assert resp.status_code == 200
     data = resp.json()
     assert data["object"] == "list"
-    ids = [m["id"] for m in data["data"]]
-    assert "qwen2.5-coder:7b" in ids
-    assert "qwen2.5-coder:14b" in ids
+    assert [m["id"] for m in data["data"]] == [settings.CHAT_MODEL, settings.FIM_MODEL]
+    assert ollama.requests == []
 
-
-def test_list_models_empty():
-    with patch.object(ollama_client, "get_json", return_value={"models": []}):
-        resp = client.get("/v1/models")
-    assert resp.status_code == 200
-    assert resp.json()["data"] == []
-
-
-# --- /v1/chat/completions ---
-
-def test_chat_completions_non_streaming():
-    mock_response = {"message": {"role": "assistant", "content": "hello"}}
-    with patch.object(ctx_manager, "build_context_prefix", return_value=""):
-        with patch.object(ollama_client, "post_json", return_value=mock_response):
-            resp = client.post("/v1/chat/completions", json={
-                "model": "qwen2.5-coder:14b",
-                "messages": [{"role": "user", "content": "hi"}],
-            })
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["choices"][0]["message"]["content"] == "hello"
-    assert body["object"] == "chat.completion"
-
-
-def test_chat_completions_streaming():
-    lines = [
-        json.dumps({"message": {"content": "hel"}, "done": False}),
-        json.dumps({"message": {"content": "lo"}, "done": False}),
-        json.dumps({"done": True}),
-    ]
-    with patch.object(ctx_manager, "build_context_prefix", return_value=""):
-        with patch.object(ollama_client, "post_stream", _stream(*lines)):
-            resp = client.post("/v1/chat/completions", json={
-                "model": "qwen2.5-coder:14b",
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": True,
-            })
-    assert resp.status_code == 200
-    assert "hel" in resp.text
-    assert "lo" in resp.text
-    assert "[DONE]" in resp.text
-
-
-def test_chat_completions_injects_rag_prefix():
-    mock_response = {"message": {"role": "assistant", "content": "hello"}}
-    with patch.object(ctx_manager, "build_context_prefix", return_value="rag context"):
-        with patch.object(ollama_client, "post_json", return_value=mock_response) as mock_post:
-            resp = client.post("/v1/chat/completions", json={
-                "model": "qwen2.5-coder:14b",
-                "messages": [{"role": "user", "content": "hi"}],
-            })
-    assert resp.status_code == 200
-    call_payload = mock_post.call_args[0][1]
-    assert call_payload["messages"][0] == {"role": "system", "content": "rag context"}
-    assert call_payload["messages"][1]["role"] == "user"
-
-
-def test_chat_completions_no_prefix_when_rag_empty():
-    mock_response = {"message": {"role": "assistant", "content": "hello"}}
-    with patch.object(ctx_manager, "build_context_prefix", return_value=""):
-        with patch.object(ollama_client, "post_json", return_value=mock_response) as mock_post:
-            resp = client.post("/v1/chat/completions", json={
-                "model": "qwen2.5-coder:14b",
-                "messages": [{"role": "user", "content": "hi"}],
-            })
-    assert resp.status_code == 200
-    call_payload = mock_post.call_args[0][1]
-    assert call_payload["messages"][0]["role"] == "user"
-    assert len(call_payload["messages"]) == 1
-
-
-def test_chat_completions_merges_rag_prefix_with_existing_system_message():
-    mock_response = {"message": {"role": "assistant", "content": "hello"}}
-    with patch.object(ctx_manager, "build_context_prefix", return_value="rag context"):
-        with patch.object(ollama_client, "post_json", return_value=mock_response) as mock_post:
-            resp = client.post("/v1/chat/completions", json={
-                "model": "qwen2.5-coder:14b",
-                "messages": [
-                    {"role": "system", "content": "you are helpful"},
-                    {"role": "user", "content": "hi"},
-                ],
-            })
-    assert resp.status_code == 200
-    call_payload = mock_post.call_args[0][1]
-    assert len(call_payload["messages"]) == 2
-    assert call_payload["messages"][0]["role"] == "system"
-    assert call_payload["messages"][0]["content"].startswith("rag context")
-    assert "you are helpful" in call_payload["messages"][0]["content"]
-    assert call_payload["messages"][1]["role"] == "user"
-
-
-# --- /v1/completions ---
-
-def test_completions_non_streaming():
-    with patch.object(ollama_client, "post_json", return_value={"response": "result"}):
-        resp = client.post("/v1/completions", json={"model": "qwen2.5-coder:7b", "prompt": "p"})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["choices"][0]["text"] == "result"
-    assert body["object"] == "text_completion"
-
-
-def test_completions_streaming_basic():
-    lines = [
-        json.dumps({"response": "def foo():", "done": False}),
-        json.dumps({"response": "\n    pass", "done": False}),
-        json.dumps({"done": True}),
-    ]
-    with patch.object(ollama_client, "post_stream", _stream(*lines)):
-        resp = client.post("/v1/completions", json={
-            "model": "qwen2.5-coder:7b", "prompt": "p", "stream": True,
-        })
-    assert resp.status_code == 200
-    assert "def foo():" in resp.text
-    assert "[DONE]" in resp.text
-
-
-def test_completions_stream_truncates_at_double_newline():
-    """Content after \\n\\n must not appear in the response."""
-    lines = [
-        json.dumps({"response": "def foo():", "done": False}),
-        json.dumps({"response": "\n    pass", "done": False}),
-        json.dumps({"response": "\n\n", "done": False}),
-        json.dumps({"response": "RUNON", "done": False}),
-    ]
-    with patch.object(ollama_client, "post_stream", _stream(*lines)):
-        resp = client.post("/v1/completions", json={
-            "model": "qwen2.5-coder:7b", "prompt": "p", "stream": True,
-        })
-    assert resp.status_code == 200
-    assert "RUNON" not in resp.text
-    assert "[DONE]" in resp.text
-
-
-def test_completions_stream_truncates_double_newline_split_across_chunks():
-    """\\n\\n spanning two chunks must still stop the stream."""
-    lines = [
-        json.dumps({"response": "foo\n", "done": False}),
-        json.dumps({"response": "\nRUNON", "done": False}),
-    ]
-    with patch.object(ollama_client, "post_stream", _stream(*lines)):
-        resp = client.post("/v1/completions", json={
-            "model": "qwen2.5-coder:7b", "prompt": "p", "stream": True,
-        })
-    assert resp.status_code == 200
-    assert "RUNON" not in resp.text
-    assert "[DONE]" in resp.text
-
-
-def test_completions_stream_double_newline_within_single_chunk():
-    """\\n\\n within one chunk: text before it is kept, text after is dropped."""
-    lines = [
-        json.dumps({"response": "kept\n\ndropped", "done": False}),
-    ]
-    with patch.object(ollama_client, "post_stream", _stream(*lines)):
-        resp = client.post("/v1/completions", json={
-            "model": "qwen2.5-coder:7b", "prompt": "p", "stream": True,
-        })
-    assert resp.status_code == 200
-    assert "kept" in resp.text
-    assert "dropped" not in resp.text
-
-
-def test_completions_stream_leading_blank_lines_not_truncated():
-    """\\n\\n before real content in a single chunk must not truncate the output."""
-    lines = [
-        json.dumps({"response": "\n\ncode", "done": False}),
-        json.dumps({"done": True}),
-    ]
-    with patch.object(ollama_client, "post_stream", _stream(*lines)):
-        resp = client.post("/v1/completions", json={
-            "model": "qwen2.5-coder:7b", "prompt": "p", "stream": True,
-        })
-    assert resp.status_code == 200
-    assert "code" in resp.text
-    assert "[DONE]" in resp.text
-
-
-def test_completions_stream_blank_only_chunk_before_content():
-    """A blank-only chunk followed by content must not trigger truncation."""
-    lines = [
-        json.dumps({"response": "\n\n", "done": False}),
-        json.dumps({"response": "code", "done": False}),
-        json.dumps({"done": True}),
-    ]
-    with patch.object(ollama_client, "post_stream", _stream(*lines)):
-        resp = client.post("/v1/completions", json={
-            "model": "qwen2.5-coder:7b", "prompt": "p", "stream": True,
-        })
-    assert resp.status_code == 200
-    assert "code" in resp.text
-    assert "[DONE]" in resp.text
-
-
-def test_completions_non_streaming_leading_blank_lines_not_truncated():
-    """Non-streaming: \\n\\n before real content must not truncate the response."""
-    with patch.object(ollama_client, "post_json", return_value={"response": "\n\ncode"}):
-        resp = client.post("/v1/completions", json={"model": "qwen2.5-coder:7b", "prompt": "p"})
-    assert resp.status_code == 200
-    assert "code" in resp.json()["choices"][0]["text"]
-
-
-# --- auth ---
 
 def test_auth_required(monkeypatch):
     monkeypatch.setattr(settings, "PROXY_AUTH_TOKEN", "secret")
@@ -258,10 +83,8 @@ def test_auth_required(monkeypatch):
 
 
 def test_auth_valid_token(monkeypatch):
-    mock_tags = {"models": []}
     monkeypatch.setattr(settings, "PROXY_AUTH_TOKEN", "secret")
-    with patch.object(ollama_client, "get_json", return_value=mock_tags):
-        resp = client.get("/v1/models", headers={"Authorization": "Bearer secret"})
+    resp = client.get("/v1/models", headers={"Authorization": "Bearer secret"})
     assert resp.status_code == 200
 
 
@@ -271,26 +94,173 @@ def test_auth_invalid_token(monkeypatch):
     assert resp.status_code == 401
 
 
-# --- model allowlist ---
+# --- upstream requests ---
 
-def test_configured_model_not_in_allowlist_raises():
-    from settings import _check_configured_models
-    import pytest
-    with pytest.raises(ValueError, match="not in ALLOWED_MODELS"):
-        _check_configured_models(frozenset({"other-model"}), "qwen2.5-coder:7b")
+def test_upstream_is_always_streamed(ollama):
+    _fim(stream=False)
+    _chat(stream=False)
+    assert [r["stream"] for r in ollama.requests] == [True, True]
 
 
-def test_fim_request_succeeds():
-    with patch.object(ollama_client, "post_json", return_value={"response": "ok"}):
-        resp = client.post("/v1/completions", json={"model": "qwen2.5-coder:7b", "prompt": "p"})
+def test_chat_pins_model_and_forwards_messages_and_options(ollama):
+    messages = [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}]
+    _chat(messages=messages, temperature=0.3, max_tokens=50)
+    sent = ollama.requests[0]
+    assert sent["model"] == settings.CHAT_MODEL
+    assert sent["messages"] == messages
+    assert sent["options"] == {"num_ctx": settings.CHAT_NUM_CTX, "temperature": 0.3, "num_predict": 50}
+
+
+# --- /v1/chat/completions ---
+
+def test_chat_non_streaming_joins_content(ollama):
+    ollama.lines = [
+        {"message": {"content": "hel"}},
+        {"message": {"content": "lo"}},
+        {"message": {"content": ""}, "done": True, "done_reason": "stop"},
+    ]
+    body = _chat().json()
+    assert body["object"] == "chat.completion"
+    assert body["choices"][0]["message"] == {"role": "assistant", "content": "hello"}
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+
+def test_chat_non_streaming_reports_length_finish(ollama):
+    ollama.lines = [{"message": {"content": "cut"}}, {"done": True, "done_reason": "length"}]
+    assert _chat().json()["choices"][0]["finish_reason"] == "length"
+
+
+def test_chat_streaming(ollama):
+    ollama.lines = [{"message": {"content": "hel"}}, {"message": {"content": "lo"}}, {"done": True}]
+    resp = _chat(stream=True)
     assert resp.status_code == 200
+    assert _sse_text(resp) == "hello"
+    assert resp.text.endswith("data: [DONE]\n\n")
 
 
-def test_list_models_filtered_by_allowlist(monkeypatch):
-    mock_tags = {"models": [{"name": "allowed"}, {"name": "blocked"}]}
-    monkeypatch.setattr(settings, "ALLOWED_MODELS", frozenset({"allowed"}))
-    with patch.object(ollama_client, "get_json", return_value=mock_tags):
-        resp = client.get("/v1/models")
+# --- /v1/completions ---
+
+def test_completions_non_streaming(ollama):
+    ollama.lines = [{"response": "result"}, {"response": "", "done": True, "done_reason": "stop"}]
+    body = _fim(stream=False).json()
+    assert body["object"] == "text_completion"
+    assert body["choices"][0]["text"] == "result"
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+
+def test_completions_streaming(ollama):
+    ollama.lines = [{"response": "def foo():"}, {"response": "\n    pass"}, {"done": True}]
+    resp = _fim(stream=True)
     assert resp.status_code == 200
-    ids = [m["id"] for m in resp.json()["data"]]
-    assert ids == ["allowed"]
+    assert _sse_text(resp) == "def foo():\n    pass"
+    assert resp.text.endswith("data: [DONE]\n\n")
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "non-stream"])
+@pytest.mark.parametrize(
+    "tokens, expected",
+    [
+        (["def foo():", "\n    pass", "\n\n", "RUNON"], "def foo():\n    pass"),
+        (["foo\n", "\nRUNON"], "foo\n"),
+        (["kept\n\ndropped"], "kept"),
+        (["\n\ncode"], "\n\ncode"),
+        (["\n\n", "code"], "\n\ncode"),
+        (["foo", " \n", "\n", "RUNON"], "foo \n"),
+        (["foo\r\n", "\r\n", "RUNON"], "foo\r\n"),
+        (["foo\n", "    \n", "RUNON"], "foo\n"),
+    ],
+    ids=[
+        "blank-line-chunk", "split-across-chunks", "within-one-chunk", "leading-blanks-kept",
+        "blank-only-first-chunk", "trailing-space-split", "crlf", "indented-blank-line",
+    ],
+)
+def test_fim_stops_at_first_blank_line_after_content(ollama, tokens, expected, stream):
+    ollama.lines = [{"response": t} for t in tokens]
+    resp = _fim(stream=stream)
+    text = _sse_text(resp) if stream else resp.json()["choices"][0]["text"]
+    assert text == expected
+
+
+# --- upstream errors ---
+
+def test_streaming_error_line_becomes_sse_error(ollama):
+    ollama.lines = [{"response": "partial"}, {"error": "model runner crashed"}]
+    resp = _fim(stream=True)
+    assert resp.status_code == 200
+    assert "Ollama error: model runner crashed" in resp.text
+    assert "[DONE]" not in resp.text
+
+
+def test_non_streaming_error_line_returns_502(ollama):
+    ollama.lines = [{"error": "model runner crashed"}]
+    resp = _chat()
+    assert resp.status_code == 502
+    assert resp.json()["error"]["message"] == "Ollama error: model runner crashed"
+
+
+def test_malformed_line_returns_502(ollama):
+    ollama.lines = ["not json"]
+    resp = _fim(stream=False)
+    assert resp.status_code == 502
+    assert resp.json()["error"]["message"] == "malformed response from Ollama"
+
+
+def test_upstream_http_error_carries_ollama_message(ollama):
+    ollama.status = 404
+    ollama.lines = [{"error": 'model "x" not found, try pulling it first'}]
+    resp = _chat()
+    assert resp.status_code == 502
+    assert 'model \\"x\\" not found' in resp.json()["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "exc, status",
+    [(httpx2.ConnectError("refused"), 502), (httpx2.ReadTimeout("slow"), 504)],
+    ids=["connect-error", "timeout"],
+)
+def test_transport_failures_map_to_gateway_errors(monkeypatch, exc, status):
+    def fail(request):
+        raise exc
+
+    _use_upstream(monkeypatch, fail)
+    assert _fim(stream=False).status_code == status
+
+
+# --- request log ---
+
+def _log_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "proxy"]
+
+
+def test_log_line_for_stopped_fim_has_request_shape_but_not_prompt(ollama, caplog):
+    ollama.lines = [{"response": "code\n\nrunon"}]
+    with caplog.at_level("INFO", logger="proxy"):
+        _fim(prompt="SECRET", max_tokens=4096, stop=["<|endoftext|>"])
+    [line] = _log_lines(caplog)
+    assert line.startswith("fim outcome=stopped ttft_ms=")
+    assert "chunks=1 prompt_chars=6 max_tokens=4096 stops=1" in line
+    assert "SECRET" not in line
+
+
+def test_log_line_includes_ollama_timings_when_generation_finishes(ollama, caplog):
+    ollama.lines = [
+        {"message": {"content": "hi"}},
+        {
+            "done": True, "done_reason": "stop", "load_duration": 0,
+            "prompt_eval_count": 12, "prompt_eval_duration": 80_000_000,
+            "eval_count": 3, "eval_duration": 30_000_000,
+        },
+    ]
+    with caplog.at_level("INFO", logger="proxy"):
+        _chat()
+    [line] = _log_lines(caplog)
+    assert line.startswith("chat outcome=done ")
+    assert "done_reason=stop load_ms=0 prompt_tokens=12 prefill_ms=80 eval_tokens=3 eval_ms=30" in line
+
+
+def test_log_line_records_upstream_errors(ollama, caplog):
+    ollama.lines = [{"error": "model runner crashed"}]
+    with caplog.at_level("INFO", logger="proxy"):
+        _chat()
+    [line] = _log_lines(caplog)
+    assert line.startswith("chat outcome=error ")

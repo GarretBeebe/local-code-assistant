@@ -1,5 +1,13 @@
 # v4 Implementation Plan: RAG Context Injection
 
+## Status: Removed in v5
+
+v4 was never enabled in production (`RAG_BASE_URL` was never set) and was removed in v5. On the
+target iGPU, injected chunks would add an estimated 10–20 s of 14B prefill per chat turn.
+Front-loading them into the system prompt would also have invalidated Ollama's KV cache every
+turn. See `context/v5-audit-fixes.md`. The code is recoverable from git (`3920a24` and
+follow-ups). This plan is preserved for reference.
+
 ## Summary
 
 Use rag-system's existing code index to inject relevant code chunks into every chat completion

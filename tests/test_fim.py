@@ -9,6 +9,7 @@ def test_to_ollama_generate_defaults():
     assert payload["model"] == settings.FIM_MODEL
     assert payload["prompt"] == "p"
     assert payload["raw"] is True
+    assert payload["keep_alive"] == settings.FIM_KEEP_ALIVE
     assert payload["options"]["temperature"] == settings.FIM_DEFAULT_TEMPERATURE
     assert payload["options"]["num_predict"] == settings.FIM_MAX_TOKENS
     assert "stop" not in payload["options"]
@@ -26,13 +27,13 @@ def test_to_ollama_generate_with_stop():
     assert payload["options"]["stop"] == ["<|end|>", "\n"]
 
 
-def test_to_ollama_generate_stream_flag():
-    req = CompletionRequest(model="m", prompt="p", stream=True)
-    payload = to_ollama_generate(req)
-    assert payload["stream"] is True
-
-
-def test_to_ollama_generate_max_tokens_override():
+def test_to_ollama_generate_max_tokens_below_ceiling_is_honored():
     req = CompletionRequest(model="m", prompt="p", max_tokens=64)
     payload = to_ollama_generate(req)
     assert payload["options"]["num_predict"] == 64
+
+
+def test_to_ollama_generate_max_tokens_capped_at_ceiling():
+    req = CompletionRequest(model="m", prompt="p", max_tokens=4096)
+    payload = to_ollama_generate(req)
+    assert payload["options"]["num_predict"] == settings.FIM_MAX_TOKENS

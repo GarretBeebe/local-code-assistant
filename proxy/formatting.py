@@ -1,11 +1,7 @@
 import time
-import uuid
 
 
-def format_chat_chunk(line: dict, model: str, chat_id: str) -> dict | None:
-    if line.get("done"):
-        return None
-    content = line.get("message", {}).get("content", "")
+def format_chat_chunk(content: str, model: str, chat_id: str) -> dict:
     return {
         "id": chat_id,
         "object": "chat.completion.chunk",
@@ -15,7 +11,7 @@ def format_chat_chunk(line: dict, model: str, chat_id: str) -> dict | None:
     }
 
 
-def _completion_dict(text: str, model: str, completion_id: str, finish_reason: str | None) -> dict:
+def format_completion(text: str, model: str, completion_id: str, finish_reason: str | None = None) -> dict:
     return {
         "id": completion_id,
         "object": "text_completion",
@@ -23,11 +19,3 @@ def _completion_dict(text: str, model: str, completion_id: str, finish_reason: s
         "model": model,
         "choices": [{"text": text, "index": 0, "finish_reason": finish_reason}],
     }
-
-
-def format_completion_chunk(text: str, model: str, completion_id: str) -> dict:
-    return _completion_dict(text, model, completion_id, None)
-
-
-def format_completion_response(text: str, model: str) -> dict:
-    return _completion_dict(text, model, f"cmpl-{uuid.uuid4().hex}", "stop")
