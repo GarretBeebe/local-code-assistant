@@ -33,8 +33,9 @@ async def _verify_token(
 ) -> None:
     if settings.PROXY_AUTH_TOKEN is None:
         return
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str, which would be a 500.
     if credentials is None or not secrets.compare_digest(
-        credentials.credentials, settings.PROXY_AUTH_TOKEN
+        credentials.credentials.encode(), settings.PROXY_AUTH_TOKEN.encode()
     ):
         raise HTTPException(status_code=401, detail="Unauthorized")
 

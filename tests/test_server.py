@@ -94,6 +94,12 @@ def test_auth_invalid_token(monkeypatch):
     assert resp.status_code == 401
 
 
+def test_auth_non_ascii_token_rejected(monkeypatch):
+    monkeypatch.setattr(settings, "PROXY_AUTH_TOKEN", "secret")
+    resp = client.get("/v1/models", headers={"Authorization": "Bearer sécret".encode("latin-1")})
+    assert resp.status_code == 401
+
+
 # --- upstream requests ---
 
 def test_upstream_is_always_streamed(ollama):
