@@ -176,14 +176,20 @@ about 1.3 s. Use 150 if you'd rather have the fastest single lines.
 - **Ollama: disable llama-server's host-RAM prompt cache (applied on the target).** Ollama runs
   each model in a llama-server process, which keeps an 8 GiB prompt cache in system RAM by
   default. Before each request with a new prompt, it copies the current cache state there.
-  - *The problem:* on the Vulkan iGPU that copy takes 17 ms while the GPU is busy but 1–4 s after
-    it has idled. So the first suggestion after any pause waited seconds before inference started.
+  - *The problem:* on the Vulkan iGPU that copy takes 17 ms while the GPU is busy, but 1.1 s after
+    5–60 s idle and about 2.1 s after 1–10 minutes idle. So the first suggestion after a short pause
+    waited 1–2 s before inference started.
   - *The fix:* set the Windows user environment variable `LLAMA_ARG_CACHE_RAM=0` (for example with
     `setx LLAMA_ARG_CACHE_RAM 0`). Then restart Ollama: Quit from the tray, then start it from the
     Start menu. Ollama doesn't pass `--cache-ram` itself, so llama-server picks the variable up, and
     its log reports "prompt cache is disabled".
-  - *Result:* time to first token after 3 minutes idle dropped from 2,263 ms to 187 ms. During
-    continuous typing it is about 60 ms.
+  - *Result:* after pauses of 3–5 minutes, the first request reaches its first token in about
+    0.2 s (187, 217 and 226 ms in three samples), instead of 1–2 s. During continuous typing it is
+    about 60 ms.
+  - *Not fixed:* after breaks of about 20 minutes or more, the iGPU drops into a deep power state.
+    The first request then still pays about 2.2 s, once, now in prefill (two samples, after 19 and
+    52 minutes idle). Switching the Windows power mode from "Balanced" to "Best performance" might
+    help; that is untested.
   - *Trade-off:* older prompts are no longer restored from RAM, for every model this Ollama serves.
     The live cache still covers consecutive edits in the same file.
 - **Ollama: flash attention.** `OLLAMA_FLASH_ATTENTION=1` with `OLLAMA_KV_CACHE_TYPE=q8_0` may
