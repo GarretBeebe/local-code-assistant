@@ -17,6 +17,8 @@ The assistant has been effectively unusable on the target hardware, for three re
 2. **The FIM model is the wrong variant and the wrong size.**
    - `qwen2.5-coder:7b` is the **Instruct** finetune (`general.finetune: Instruct`), not the base
      model Qwen trains for FIM. The `\n\n` truncation patches the symptom: run-on output.
+     *Correction after benchmarking:* base models run on at about the same rate, so the variant was
+     not the cause of the run-on (see Tuning Results). The size finding stands.
    - Measured on this iGPU: ~158 tok/s prefill and ~8.9 tok/s decode, not the README's
      "~35 tok/s". Continue's default 1024-token autocomplete prompt costs ~6 s of prefill.
    - A cold load costs 26 s after Ollama's 5-minute idle unload.
@@ -372,3 +374,48 @@ simplifier was report-only)
   `aclosing(self.body_iterator)`, which couples the proxy to Starlette internals.
 - **Unexpected upstream shapes** (well-formed JSON that isn't an object) surface as 500s. Real
   Ollama doesn't send them.
+
+---
+
+## Tuning Results (2026-10-05)
+
+**Method**
+- **Cases:** 12 cursor positions sampled from this repo's Python files, half at line start and half
+  mid-line. The ground truth is the real rest of the line.
+- **Prompt:** Continue's Qwen FIM format,
+  `<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>`, with its 9 template stop tokens.
+- **Payload:** the proxy's exact payload (raw, `num_ctx` 4096, temperature 0.1, `num_predict` 64).
+- **Prompt sizes:** about 790 and about 430 real tokens. Prefix and suffix are pruned by whole
+  lines, as Continue does.
+- **Setup:** run against Ollama directly from a throwaway container. Pulling
+  `qwen2.5-coder:3b-base` and `qwen2.5-coder:1.5b-base` for this was approved by the user.
+
+**Results** (medians):
+
+| Model | Prompt | First token | First line | Ollama freed | Prefill / decode | First-line exact / similarity | Self-terminated |
+|---|---|---|---|---|---|---|---|
+| 7b (instruct) | ~790 | 4131 ms | 4817 ms | 6985 ms | 206 / 10.1 tok/s | 2/12 · 0.67 | 6/12 |
+| 7b (instruct) | ~430 | 2333 ms | 3126 ms | 8616 ms | 209 / 10.0 tok/s | 1/12 · 0.60 | 4/12 |
+| 3b-base | ~790 | 2212 ms | 2579 ms | 3405 ms | 405 / 19.6 tok/s | 2/12 · 0.60 | 5/12 |
+| 3b-base | ~430 | 1309 ms | 1833 ms | 2508 ms | 404 / 19.7 tok/s | 1/12 · 0.56 | 4/12 |
+| 1.5b-base | ~790 | 1214 ms | 1352 ms | 2031 ms | 781 / 36.1 tok/s | 1/12 · 0.59 | 6/12 |
+| 1.5b-base | ~430 | 722 ms | 963 ms | 1257 ms | 781 / 36.6 tok/s | 1/12 · 0.60 | 7/12 |
+
+Cold loads were 31.2 s for 7b, 2.9 s for 3b, and 2.1 s for 1.5b.
+
+**Conclusions**
+- **Latency decides the model.** 1.5b-base shows its first line about 3.5× sooner than 7b and is
+  the only model under the 1.5 s first-line target.
+- **Accuracy doesn't separate them** at n=12. 7b's similarity edge comes from a single case
+  (tests/test_server.py:262); without it, the paired difference against 1.5b is about 0.
+- **Self-termination is about the same for base and instruct**, roughly half the time. The audit's
+  claim that the Instruct variant caused the run-on is therefore withdrawn. The proxy's blank-line
+  stop stays necessary for every model.
+- **A ~430-token prompt nearly halves time to first token** with no measurable accuracy loss.
+
+**Actions taken**
+- The default `FIM_MODEL` is now `qwen2.5-coder:1.5b-base`; `3b-base` stays installed as a
+  one-line step up.
+- The README now recommends Continue `maxPromptTokens: 512` and `modelTimeout: 1500`.
+- The Continue client config lives on whichever machine runs the editor. It is not on the proxy
+  host, whose `~/.continue/config.yaml` has no models.

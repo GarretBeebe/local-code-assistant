@@ -7,16 +7,26 @@ Tab completion and chat run on local models: zero API costs, and no code leaves 
 **Hardware target:** GMKtec K16 (Ryzen 7 7735HS, 32GB RAM, Radeon 680M iGPU via Ollama's Vulkan backend)
 
 **Models (defaults):**
-- `qwen2.5-coder:7b` — FIM / tab autocomplete
+- `qwen2.5-coder:1.5b-base` — FIM / tab autocomplete
 - `qwen2.5-coder:14b` — chat, edit, apply
 
-**Measured on the target (Ollama 0.35, Vulkan):**
-- **7B throughput:** ~158 tok/s prefill, ~9 tok/s decode.
-- **Cold load:** ~26 s for a 7B model.
-- **Autocomplete prefill:** Continue's default 1024-token prompt costs ~6 s before the first token.
+**FIM benchmark on the target (Ollama 0.35, Vulkan).** Medians over 12 cursor positions in this
+repo, using Continue's prompt format:
 
-These numbers drive most of the tuning advice below; see
-[`context/v5-audit-fixes.md`](context/v5-audit-fixes.md).
+| FIM model | Prompt | First token | First line | Prefill / decode | First-line similarity | Cold load |
+|---|---|---|---|---|---|---|
+| `qwen2.5-coder:7b` (instruct) | ~790 tok | 4.1 s | 4.8 s | 206 / 10 tok/s | 0.67 | 31 s |
+| `qwen2.5-coder:3b-base` | ~790 tok | 2.2 s | 2.6 s | 405 / 20 tok/s | 0.60 | 3 s |
+| `qwen2.5-coder:1.5b-base` | ~790 tok | 1.2 s | 1.35 s | 781 / 36 tok/s | 0.59 | 2 s |
+| `qwen2.5-coder:1.5b-base` | ~430 tok | 0.7 s | 0.96 s | 781 / 37 tok/s | 0.60 | — |
+
+- **Accuracy:** the differences are within noise at this sample size. 7B's edge comes from a
+  single case.
+- **Termination:** every model, base or instruct, runs on past the intended completion about half
+  the time. The proxy's blank-line stop is therefore needed regardless of model.
+- **Choice:** 1.5B is the only model that meets a sub-1.5 s first-line target.
+
+Full method and results are in [`context/v5-audit-fixes.md`](context/v5-audit-fixes.md).
 
 ## Architecture
 
@@ -84,8 +94,8 @@ container restarts automatically (`restart: unless-stopped`). The image installs
 Pull the models if you haven't already:
 
 ```bash
-ollama pull qwen2.5-coder:14b   # chat
-ollama pull qwen2.5-coder:7b    # FIM autocomplete
+ollama pull qwen2.5-coder:14b        # chat
+ollama pull qwen2.5-coder:1.5b-base  # FIM autocomplete
 ```
 
 All settings are documented in [`.env.example`](.env.example).
@@ -132,13 +142,13 @@ models:
       maxTokens: 2048
   - name: Local (Autocomplete)
     provider: openai
-    model: qwen2.5-coder:7b         # Continue picks its FIM prompt template from this name
+    model: qwen2.5-coder:1.5b-base  # the proxy serves FIM_MODEL; Continue picks its Qwen FIM template from this name
     apiBase: http://<proxy-host>:8080/v1
     apiKey: <PROXY_AUTH_TOKEN>
     roles: [autocomplete]
     autocompleteOptions:
-      maxPromptTokens: 512  # default 1024; prefill cost scales with prompt size
-      modelTimeout: 2000    # default 150 ms; see below
+      maxPromptTokens: 512  # default 1024; measured ~45% lower time to first token, no accuracy loss
+      modelTimeout: 1500    # default 150 ms; see below
 ```
 
 **Why `modelTimeout` matters on local hardware.** Two Continue behaviors depend on it:
@@ -146,8 +156,9 @@ models:
   what it has.
 - It aborts a request that is still streaming after 2.5 × `modelTimeout`.
 
-The 150 ms default therefore means single-line suggestions here. Raise it if you want multi-line
-completions, and lower it if you'd rather have faster single lines.
+With the 150 ms default, every suggestion is a single line, shown after about 1 s with the 1.5B
+model. With `1500`, multi-line suggestions get time to finish: the median completion is done by
+about 1.3 s. Use 150 if you'd rather have the fastest single lines.
 
 **Supported Continue modes:**
 - **Chat, Edit, and Apply** work.
@@ -155,12 +166,11 @@ completions, and lower it if you'd rather have faster single lines.
   messages.
 - **Image inputs** are rejected.
 
-## Tuning Experiments (no code changes)
+## Tuning (no code changes)
 
-- **FIM model.** `qwen2.5-coder:7b` is the *Instruct* finetune. Qwen trains its **base** models
-  for FIM.
-  - To try one, run `ollama pull qwen2.5-coder:3b-base` (or `1.5b-base`) and set `FIM_MODEL`.
-  - Compare `ttft_ms` and `total_ms` in the proxy log. A 3B model prefills about 2.5× faster here.
+- **FIM model.** If 1.5B suggestions feel weak, set `FIM_MODEL=qwen2.5-coder:3b-base`. It
+  roughly doubles latency, and the benchmark showed no accuracy gain at its sample size. Compare
+  `ttft_ms` and `total_ms` in the proxy log.
 - **Chat model.** The 14B decodes at an estimated ~4–5 tok/s on this iGPU. `qwen2.5-coder:7b` is
   about twice as fast for chat.
 - **Ollama.** `OLLAMA_FLASH_ATTENTION=1` with `OLLAMA_KV_CACHE_TYPE=q8_0` may help prefill and
