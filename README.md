@@ -173,8 +173,21 @@ about 1.3 s. Use 150 if you'd rather have the fastest single lines.
   `ttft_ms` and `total_ms` in the proxy log.
 - **Chat model.** The 14B decodes at an estimated ~4–5 tok/s on this iGPU. `qwen2.5-coder:7b` is
   about twice as fast for chat.
-- **Ollama.** `OLLAMA_FLASH_ATTENTION=1` with `OLLAMA_KV_CACHE_TYPE=q8_0` may help prefill and
-  memory. It's unverified on Vulkan, so benchmark it.
+- **Ollama: disable llama-server's host-RAM prompt cache (applied on the target).** Ollama runs
+  each model in a llama-server process, which keeps an 8 GiB prompt cache in system RAM by
+  default. Before each request with a new prompt, it copies the current cache state there.
+  - *The problem:* on the Vulkan iGPU that copy takes 17 ms while the GPU is busy but 1–4 s after
+    it has idled. So the first suggestion after any pause waited seconds before inference started.
+  - *The fix:* set the Windows user environment variable `LLAMA_ARG_CACHE_RAM=0` (for example with
+    `setx LLAMA_ARG_CACHE_RAM 0`). Then restart Ollama: Quit from the tray, then start it from the
+    Start menu. Ollama doesn't pass `--cache-ram` itself, so llama-server picks the variable up, and
+    its log reports "prompt cache is disabled".
+  - *Result:* time to first token after 3 minutes idle dropped from 2,263 ms to 187 ms. During
+    continuous typing it is about 60 ms.
+  - *Trade-off:* older prompts are no longer restored from RAM, for every model this Ollama serves.
+    The live cache still covers consecutive edits in the same file.
+- **Ollama: flash attention.** `OLLAMA_FLASH_ATTENTION=1` with `OLLAMA_KV_CACHE_TYPE=q8_0` may
+  help prefill and memory. It's unverified on Vulkan, so benchmark it.
 
 See [`context/local-code-assistant.md`](context/local-code-assistant.md) for the original design
 notes and [`context/v5-audit-fixes.md`](context/v5-audit-fixes.md) for the audit behind the

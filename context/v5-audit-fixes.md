@@ -446,9 +446,64 @@ Cold loads were 31.2 s for 7b, 2.9 s for 3b, and 2.1 s for 1.5b.
 - **Cleanup:** the pre-v5 image (`4c3be59ea723`, which contained `.env`) and the `:v5-test` image
   are gone.
 
-**Still pending outside this repo**
-- Caddy hardening on the Pi: path allowlist, `request_body max_size`, and no
-  `flush_interval -1`. Low-latency mode stops Caddy cancelling the backend request when the client
-  disconnects.
-- Continue client config on the editor machine.
-- Removing the now-ignored `ALLOWED_MODELS` / `RAG_*` keys from `.env`.
+**Follow-ups outside this repo**
+- **Caddy hardening on the Pi: done and verified on 2026-10-05.**
+  - Only `/v1/*` and `/healthz` are forwarded. Probes get a 404 from Caddy and never reach the
+    proxy.
+  - `request_body max_size 4MB`: a 5 MB POST gets a 413 from Caddy.
+  - SSE streams incrementally through Caddy.
+  - A client abort through Caddy cancelled Ollama at 1.44 s, which confirms `flush_interval -1` is
+    not set.
+  - A 70-request burst got all 200s.
+- **`.env` cleanup:** the ignored `ALLOWED_MODELS` / `RAG_*` keys were removed, and the container
+  was recreated without them.
+- **Still open:** applying the README's Continue config on the editor machine.
+
+---
+
+## Ollama Host Tuning: First Request After Idle (2026-10-05)
+
+**Symptom**
+- The proxy log showed `ttft_ms` far above Ollama's `prefill_ms` on the first request after a
+  pause. One example was 2,263 ms against 38 ms, with the model already loaded (`load_ms=10`).
+- Ollama's own request log matched, for instance 3.14 s against llama-server's 0.33 s.
+
+**Diagnosis**
+- `OLLAMA_DEBUG=1` showed that Ollama's scheduler handed the request over in 2 ms.
+- The delay was inside llama-server: `prompt cache update took 2118.02 ms` while saving a
+  0.493 MiB slot state. llama-server keeps a host-RAM prompt cache (`--cache-ram`, default
+  8192 MiB), and it copies the current KV state there before switching to a new prompt.
+- Pairing every save in that day's logs with the idle time before it:
+
+| Idle before request | n | Median save | Max |
+|---|---|---|---|
+| < 5 s | 111 | 17 ms | 389 ms |
+| 5–60 s | 2 | 1,091 ms | 1,091 ms |
+| 1–10 min | 3 | 2,118 ms | 2,798 ms |
+
+- The device-to-host copy is slow once the Vulkan iGPU has idled.
+
+**Fix**
+- Ollama starts llama-server without `--cache-ram`. llama-server reads the option from
+  `LLAMA_ARG_CACHE_RAM` (per `llama-server.exe --help`).
+- Setting the Windows user environment variable `LLAMA_ARG_CACHE_RAM=0` and restarting Ollama
+  makes llama-server log "prompt cache is disabled".
+
+**Result** (3 minutes idle, then one FIM request through the proxy):
+
+| | Cache on | Cache off |
+|---|---|---|
+| Time to first token | 2,263 ms | 187 ms |
+| Ollama request time | 2.58 s | 0.58 s |
+| Cache save | 2,118 ms | none |
+| Prefill | 38 ms | 155 ms |
+
+- The cost did not move into prefill.
+- During sustained requests, time to first token is about 60 ms. The first one or two requests
+  after a pause add 150–400 ms while the iGPU clocks ramp up.
+
+**Trade-offs and notes**
+- llama-server no longer restores older prompts from RAM, for every model this Ollama serves. That
+  includes graph-rag's.
+- FIM keeps its main reuse, because the live slot cache covers consecutive edits in the same file.
+- `OLLAMA_DEBUG` was removed again after the diagnosis.
