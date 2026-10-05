@@ -1,6 +1,6 @@
 # v5: Audit Fixes — Responsiveness, Accuracy, Simplification
 
-**Status:** Implemented (2026-10-05); not yet deployed. See Implementation Notes at the end.
+**Status:** Implemented and deployed (2026-10-05). See Implementation Notes, Tuning Results, and Deployment at the end.
 
 ## Summary
 
@@ -419,3 +419,36 @@ Cold loads were 31.2 s for 7b, 2.9 s for 3b, and 2.1 s for 1.5b.
 - The README now recommends Continue `maxPromptTokens: 512` and `modelTimeout: 1500`.
 - The Continue client config lives on whichever machine runs the editor. It is not on the proxy
   host, whose `~/.continue/config.yaml` has no models.
+
+---
+
+## Deployment (2026-10-05)
+
+**Release**
+- Commits `09de3a2` (v5), `e646abc` (non-ASCII token → 401), and `845c907` (FIM model).
+- Deployed with the compose command.
+- `/home/garret/Code` is a symlink to `/mnt/c/Users/Garret/Code`, so there is a single checkout and
+  no clone sync is needed.
+
+**Live checks**
+- **Container:** running with `restart=unless-stopped`.
+- **Image:** runs as `appuser`, and has no `.env` and no host `.venv`.
+- **Auth:** `/healthz` returns 200. `/v1/models` returns 401 without a token, with a wrong token,
+  and with a non-ASCII token (previously a 500). With a valid token it lists `qwen2.5-coder:14b`
+  and `qwen2.5-coder:1.5b-base`.
+- **FIM through the real path** (proxy → `host.docker.internal` → Ollama on Windows):
+  - Cold request: a 1.9 s load and 304 ms of prefill for 231 tokens.
+  - Warm request: Ollama's prompt cache cut prefill to 32 ms, so the first token arrived in 48 ms.
+- **Cancellation against real Ollama:** a 2,495-token request aborted after 1 s gave
+  `outcome=cancelled total_ms=1013`, and Ollama's own request log shows it ending at **1.0 s**,
+  mid-prefill. The same request run to completion held Ollama's only slot for **5.5 s** (2.0 s
+  prefill, then 128 tokens).
+- **Cleanup:** the pre-v5 image (`4c3be59ea723`, which contained `.env`) and the `:v5-test` image
+  are gone.
+
+**Still pending outside this repo**
+- Caddy hardening on the Pi: path allowlist, `request_body max_size`, and no
+  `flush_interval -1`. Low-latency mode stops Caddy cancelling the backend request when the client
+  disconnects.
+- Continue client config on the editor machine.
+- Removing the now-ignored `ALLOWED_MODELS` / `RAG_*` keys from `.env`.
